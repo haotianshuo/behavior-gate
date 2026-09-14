@@ -566,27 +566,53 @@ def _warn_if_stale(policy_path, raw):
 
     只警告，不改变行为 —— 因为这个判定本身可能误报
     （用户可能有意固定使用某个旧版本策略）。
+
+    ⚠️ 每个 (生效文件, 版本) 组合只提示【一次】（3.5.5 修）。
+       修前：每次 hook 调用都打印 —— 一个会话几十次工具调用会刷屏，
+       用户被淹没之后反而看不见任何提示，等于没提示。
+       用状态目录下的标记文件去重，跨进程有效。
     """
     try:
         got = str(raw.get("_version") or "").strip()
         here = os.path.dirname(os.path.abspath(__file__))
         want = open(os.path.join(here, "VERSION"), encoding="utf-8").read().strip()
-        if got and want and got != want:
-            # 只在【全局兜底副本】上警告 —— 包内副本版本不符是打包错误，
-            # 那种情况由 verify_deploy 负责，不在这里重复报。
-            home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-            in_home = os.path.abspath(policy_path).startswith(
-                os.path.abspath(os.path.join(home, ".claude")))
-            if in_home:
-                sys.stderr.write(
-                    "【配置陈旧】正在生效的策略来自全局副本，版本 %s，"
-                    "而当前 hooks 是 %s。\n"
-                    "  生效文件：%s\n"
-                    "  影响：你对包内 policy/behavior-policy.json 的修改【不会生效】，"
-                    "因为全局副本优先级更高。\n"
-                    "  要使用新策略：删除或更新上面那个文件。\n"
-                    % (got, want, policy_path))
-                sys.stderr.flush()
+        if not (got and want and got != want):
+            return
+
+        # 只在【全局兜底副本】上警告 —— 包内副本版本不符是打包错误，
+        # 那种情况由 verify_deploy 负责，不在这里重复报。
+        home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        in_home = os.path.abspath(policy_path).startswith(
+            os.path.abspath(os.path.join(home, ".claude")))
+        if not in_home:
+            return
+
+        # 去重标记：同一份陈旧策略只提示一次
+        import hashlib
+        tag = hashlib.sha256(
+            ("%s|%s" % (policy_path, got)).encode("utf-8")).hexdigest()[:16]
+        marker = os.path.join(state_dir(), ".warned-stale-%s" % tag)
+        if os.path.exists(marker):
+            return
+
+        try:
+            os.makedirs(state_dir(), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(want)
+        except Exception:
+            # 标记写不下去也要提示 —— 宁可重复一次，不可静默
+            pass
+
+        sys.stderr.write(
+            "【配置陈旧】正在生效的策略来自全局副本，版本 %s，"
+            "而当前 hooks 是 %s。\n"
+            "  生效文件：%s\n"
+            "  影响：你对包内 policy/behavior-policy.json 的修改【不会生效】，"
+            "因为全局副本优先级更高。\n"
+            "  要使用新策略：删除或更新上面那个文件。\n"
+            "  （此提示每个会话只出现一次）\n"
+            % (got, want, policy_path))
+        sys.stderr.flush()
     except Exception:
         # 本函数是提示性的，绝不能成为新的崩溃源
         pass

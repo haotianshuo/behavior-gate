@@ -118,21 +118,57 @@ def main():
     # 修前的问题不是"没做限额"，而是"计了数但没有任何人看得到"——
     #   那和没计数是一样的，而且 policy 里写个数字不执行更是"假能力"。
     #   现在每次越过阈值都会打印一行，用户和模型都能看到。
-    if tool in ("Bash", "WebFetch"):
+    if tool == "Bash":
+        st = load_state(path) or {}
+
+        # 重复命令提示（3.5.5 新增）。
+        # 检测逻辑【早就存在】（_record 里同一条命令第 3 次会记进
+        # repeat_suspects），但除了写入方没有任何代码读它 ——
+        # 计了数没人看，和没计数一样。这是和 bash 计数同一个毛病。
+        #
+        # 为什么是提示而不是拦截：
+        #   同一条命令跑 3 次有时是合理的（轮询等待、重试）。机械拦截会误伤。
+        #   但如果是"同一个错误反复重试"，用户应该看到这件事 ——
+        #   这正是本门要解决的「重复工作」问题里能机械检测的那一部分。
+        rp = st.get("repeat_suspects") or []
+        if rp:
+            last = rp[-1]
+            # 只在【刚记录这一条】时提示一次
+            if last.get("ts") and last.get("cmd") == \
+                    re.sub(r"\s+", " ", (ti.get("command") or "").strip())[:200]:
+                sys.stderr.write(
+                    "【重复提醒】本次会话里这条命令已出现 3 次：\n"
+                    "  %s\n"
+                    "  这不是拦截。如果是在轮询等待，忽略即可；\n"
+                    "  如果是在反复重试同一个失败操作，建议先确认失败原因再继续。\n"
+                    % last["cmd"][:120])
+                sys.stderr.flush()
+
+        # 用量警告
         budget = policy.get("budget") or {}
-        warn_at = budget.get("bash_warn_at" if tool == "Bash" else "webfetch_warn_at")
+        warn_at = budget.get("bash_warn_at")
         if warn_at:
-            st = load_state(path) or {}
-            used = len(st.get("bash_cmds") or []) if tool == "Bash" \
-                else int(st.get("webfetch_count") or 0)
+            used = len(st.get("bash_cmds") or [])
             # 只在【恰好越过】阈值时提醒一次，避免每次调用都刷屏
             if used == int(warn_at):
                 sys.stderr.write(
-                    "【用量提醒】本次会话 %s 调用已达 %d 次。\n"
+                    "【用量提醒】本次会话 Bash 调用已达 %d 次。\n"
                     "  这不是拦截，只是一次可见性提示。\n"
                     "  若这是正常的深度调研，忽略即可；\n"
                     "  若你在反复重试同类命令，考虑先确认方向再继续。\n"
-                    % (tool, used))
+                    % used)
+                sys.stderr.flush()
+
+    elif tool == "WebFetch":
+        budget = policy.get("budget") or {}
+        warn_at = budget.get("webfetch_warn_at")
+        if warn_at:
+            st = load_state(path) or {}
+            used = int(st.get("webfetch_count") or 0)
+            if used == int(warn_at):
+                sys.stderr.write(
+                    "【用量提醒】本次会话 WebFetch 调用已达 %d 次。\n"
+                    "  这不是拦截，只是一次可见性提示。\n" % used)
                 sys.stderr.flush()
 
     allow()
