@@ -38,6 +38,10 @@ results = []
 def run(script, payload, tmp):
     env = dict(os.environ)
     env["CLAUDE_BUDGET_STATE_DIR"] = tmp
+    # 显式锁定包内策略 —— 不读机器上的全局副本（详见 four_gate_selftest.py 说明）
+    env["CLAUDE_BEHAVIOR_POLICY"] = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "policy", "behavior-policy.json")
     p = subprocess.run([PY, os.path.join(HOOKS, script)],
                        input=json.dumps(payload).encode("utf-8"),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)

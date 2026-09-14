@@ -1,13 +1,17 @@
 {
   "_comment": "行为门策略内核（工具无关）。适配器读取本文件，不硬编码规则。",
-  "_version": "3.5.2",
+  "_version": "3.5.3",
   "_v25_note": "删除 bash_rounds / webfetch 的预算声明 —— 它们从未被执行，是假能力。声明一个不被执行的上限，比不声明更糟。",
   "budget": {
     "agent_spawns": 0,
     "agent_depth": 1,
-    "_note": "只保留【真正会被执行】的预算。agent_spawns 有 PreToolUse 强制；agent_depth 有子代理检查。",
+    "_note": "agent_spawns 有 PreToolUse 强制；agent_depth 有子代理检查。这两个是硬上限。",
     "_removed": "bash_rounds / webfetch 曾声明为 40 / 5，实际本会话用了 143 次 Bash（超 3.6 倍）且门不拦。声明一个不被执行的上限 = 假能力，已删除。",
-    "_future": "若将来要真限制 Bash，必须先量出合理阈值（当前无数据），并实现 PreToolUse(Bash) 的计数器 —— 而不是先在 policy 里写个数字。"
+    "bash_warn_at": 300,
+    "webfetch_warn_at": 50,
+    "_warn_note": "这两个是【警告阈值】，不是硬上限。越过时打印一行提示，不阻断。",
+    "_why_warn": "硬拦需要一个有数据支撑的合理阈值。当前没有实测分布 —— 在无数据时硬拦会误伤正常调研任务。先让用量可见，跑出真实分布后再决定是否硬拦。",
+    "_warn_impl": "由 closeout_gate.py 在每次 Bash/WebFetch 后读取并比较；恰好越过时提示一次，不刷屏。"
   },
   "effect_gate": {
     "enabled": true,
@@ -21,8 +25,9 @@
     "_known_bypass": "实测：写 os.remove / shutil.rmtree 的 .py 脚本可以完全绕过 G5（本会话实际发生过）。"
   },
   "closeout": {
-    "enabled": false,
-    "_note": "默认关闭。理由：产出了 27KB 数据但从未被任何人读取。要重新启用，须先证明有人会读它。"
+    "enabled": true,
+    "_note": "开启。理由：它的计数现在【真的被读取】了 —— closeout_gate 用它做 Bash/WebFetch 用量提醒，并在收尾时呈现派生请求与后台命令。",
+    "_was": "3.5.2 及之前这里是 false 并写着「默认关闭」。但那个开关【没有任何代码读它】—— 声明与行为不一致，同 #2/#21 的形状。3.5.3 修：门现在真的读这个开关。"
   },
   "gateway_budget": {
     "_comment": "跨 harness 的预算层。hook 只在 Claude Code 生效，换客户端后预算要靠网关。",

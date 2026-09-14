@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本项目供 AI 编码助手（Claude Code / Codex / Cursor 等）阅读的项目说明。
+本项目供 Claude Code 阅读的项目说明。
 
 ---
 

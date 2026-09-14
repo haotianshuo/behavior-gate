@@ -23,7 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (  # noqa: E402
-    read_input, allow, state_path, locked_update,
+    read_input, allow, state_path, locked_update, load_policy, load_state,
 )
 
 
@@ -93,11 +93,48 @@ def main():
     ti = data.get("tool_input") or {}
     agent_id = data.get("agent_id")
 
+    # ⚠️ 本门读 policy —— 这在 3.5.3 之前是缺的。
+    #    修前：policy 写 `closeout.enabled = false`（"默认关闭"），
+    #    但本文件完全不读 policy，无条件运行并写盘。
+    #    「声明与行为不一致」正是本项目要消灭的模式（同 #2、#21 的形状）。
+    #    现在 enabled=false 会真的让本门提前退出。
+    policy = load_policy()
+    if not (policy.get("closeout") or {}).get("enabled", True):
+        allow()
+
     path = state_path(session_id, "closeout")
     # ⚠️ 必须进临界区：同一批并行工具调用会同时读同一个文件，
     # 各自写回 → 后写的覆盖先写的，收口记录静默丢条目。
     # 这和 G1 的预算是同一类问题（读-改-写竞态），只是后果更隐蔽。
     locked_update(path, lambda st: _record(st, session_id, tool, ti, agent_id))
+
+    # --- 用量警告（3.5.3 新增）---
+    #
+    # 为什么是警告而不是拦截：
+    #   硬拦截需要一个"合理阈值"，而当前【没有实测分布】作为依据。
+    #   在没有数据时硬拦 = 拿用户当实验品，正常调研任务会被误伤。
+    #   所以先让用量【可见】，跑一段时间拿到真实分布，再决定是否硬拦。
+    #
+    # 修前的问题不是"没做限额"，而是"计了数但没有任何人看得到"——
+    #   那和没计数是一样的，而且 policy 里写个数字不执行更是"假能力"。
+    #   现在每次越过阈值都会打印一行，用户和模型都能看到。
+    if tool in ("Bash", "WebFetch"):
+        budget = policy.get("budget") or {}
+        warn_at = budget.get("bash_warn_at" if tool == "Bash" else "webfetch_warn_at")
+        if warn_at:
+            st = load_state(path) or {}
+            used = len(st.get("bash_cmds") or []) if tool == "Bash" \
+                else int(st.get("webfetch_count") or 0)
+            # 只在【恰好越过】阈值时提醒一次，避免每次调用都刷屏
+            if used == int(warn_at):
+                sys.stderr.write(
+                    "【用量提醒】本次会话 %s 调用已达 %d 次。\n"
+                    "  这不是拦截，只是一次可见性提示。\n"
+                    "  若这是正常的深度调研，忽略即可；\n"
+                    "  若你在反复重试同类命令，考虑先确认方向再继续。\n"
+                    % (tool, used))
+                sys.stderr.flush()
+
     allow()
 
 

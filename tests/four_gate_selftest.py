@@ -29,18 +29,28 @@ except Exception:
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HOOKS = os.path.join(os.path.dirname(HERE), "adapters", "claude-code", "hooks")
+ROOT = os.path.dirname(HERE)
+HOOKS = os.path.join(ROOT, "adapters", "claude-code", "hooks")
+# 包内策略文件。测试必须【显式指定】它，不能依赖机器上的全局副本 ——
+# 修 #29 时踩到：load_policy 的查找顺序里 ~/.claude/behavior-policy.json
+# 优先于包内那份，于是同一份代码在不同机器上读到不同策略，
+# 测试结果随环境而变（本机上那份是 2.5.0 的旧副本，closeout.enabled=false，
+# 导致「收口状态已落盘」这条断言失败）。
+# 测试要证明的是【这份代码】的行为，所以必须锁定【这份代码自带的策略】。
+DEFAULT_POLICY_PATH = os.path.join(ROOT, "policy", "behavior-policy.json")
 PY = sys.executable
 
 results = []
 
 
 def run(script, payload, state_dir, policy=None):
-    """跑一个 hook，返回 (exitcode, stdout, stderr)。"""
+    """跑一个 hook，返回 (exitcode, stdout, stderr)。
+
+    policy 默认为包内策略 —— 显式隔离，避免读到机器上的全局副本。
+    """
     env = dict(os.environ)
     env["CLAUDE_BUDGET_STATE_DIR"] = state_dir
-    if policy:
-        env["CLAUDE_BEHAVIOR_POLICY"] = policy
+    env["CLAUDE_BEHAVIOR_POLICY"] = policy or DEFAULT_POLICY_PATH
     p = subprocess.run(
         [PY, os.path.join(HOOKS, script)],
         input=json.dumps(payload).encode("utf-8"),

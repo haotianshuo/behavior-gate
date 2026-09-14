@@ -7,6 +7,15 @@ BUG-3 只认中文        —— 英文 prompt 完全不被识别（用户工作
 """
 import json, os, subprocess, sys, tempfile
 
+# 显式锁定包内策略 —— 不读机器上的全局副本（详见 four_gate_selftest.py 说明）。
+# 同一份代码在不同机器上读到不同策略，会让测试结果随环境而变。
+_POLICY_ENV = dict(os.environ)
+_POLICY_ENV["CLAUDE_BEHAVIOR_POLICY"] = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "policy", "behavior-policy.json")
+
+
+
 # --- 控制台编码（可移植性）---
 # Windows 控制台默认 GBK(cp936)；print 中文时遇到非 GBK 字符会抛
 # UnicodeEncodeError，脚本直接崩。实测：CI 在 windows-latest 上必崩，

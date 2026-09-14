@@ -10,6 +10,15 @@ import subprocess
 import sys
 import tempfile
 
+# 显式锁定包内策略 —— 不读机器上的全局副本（详见 four_gate_selftest.py 说明）。
+# 同一份代码在不同机器上读到不同策略，会让测试结果随环境而变。
+_POLICY_ENV = dict(os.environ)
+_POLICY_ENV["CLAUDE_BEHAVIOR_POLICY"] = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "policy", "behavior-policy.json")
+
+
+
 # --- 控制台编码（可移植性）---
 # Windows 控制台默认 GBK(cp936)；print 中文时遇到非 GBK 字符会抛
 # UnicodeEncodeError，脚本直接崩。实测：CI 在 windows-latest 上必崩，
@@ -124,11 +133,11 @@ def main():
     check("无关工具直接放行", rc == 0, "rc=%s" % rc)
 
     p = subprocess.run([PY, os.path.join(HOOKS, "intent_gate.py")],
-                       input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_POLICY_ENV)
     check("空 stdin 不崩", p.returncode == 0, "rc=%s" % p.returncode)
 
     p = subprocess.run([PY, os.path.join(HOOKS, "intent_gate.py")],
-                       input=b"{bad json", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       input=b"{bad json", stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_POLICY_ENV)
     check("非法 JSON 不崩", p.returncode == 0, "rc=%s" % p.returncode)
 
     print("\n" + "=" * 60)

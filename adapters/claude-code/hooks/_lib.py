@@ -468,6 +468,16 @@ DEFAULT_POLICY = {
         #   到 DEFAULT_POLICY —— 删键 = 回退默认值，等于没删。
         #   真正移除必须【同时删掉默认值】。
         #   我又一次证明了"我执行了动作"，但没验证"它生效了"。
+        #
+        # --- 3.5.3 重新引入，但换了语义 ---
+        # bash_warn_at / webfetch_warn_at 是【警告阈值】，不是硬上限。
+        # 为什么是警告不是拦截：
+        #   拦截需要"合理阈值"，而当前【没有实测分布】作为依据。
+        #   在没有数据时硬拦，会造成误伤（正常调研任务被卡死）。
+        #   所以先做成可见的警告，跑一段时间拿到真实分布再决定是否硬拦。
+        # 这比"只在 policy 里写个数字然后不执行"强：警告会被真的打印出来。
+        "bash_warn_at": 300,
+        "webfetch_warn_at": 50,
     },
     "effect_gate": {
         "enabled": True,
@@ -521,13 +531,65 @@ def load_policy():
         os.environ.get("USERPROFILE") or os.path.expanduser("~"),
         ".claude", "behavior-policy.json"))
 
+    # ⚠️ 陈旧副本检测（3.5.3 新增，修 #29）
+    #
+    # 实测踩到：开发机上 ~/.claude/behavior-policy.json 留着 9 月 13 日
+    # 安装时的旧副本（_version 2.5.0，closeout.enabled=false）。
+    # 它排在候选列表里且【优先命中】，于是改了包里那份 policy 后：
+    #   · 门读到的仍是旧副本 → 修改完全不生效
+    #   · 而且没有任何提示 —— 用户以为改了，实际没改
+    #
+    # 这和项目定义的「最严重缺陷」是同一类：看起来改了、实际没生效。
+    #
+    # 修法不是改查找顺序（顺序本身是对的：包内优先于全局），
+    # 而是【让覆盖可见】：命中的文件若版本低于本 hook 的 VERSION，
+    # 打一行警告说明"你改的不是正在生效的那份"。
+    chosen = None
     for p in candidates:
         try:
             with open(p, "r", encoding="utf-8") as f:
-                return _deep_merge(DEFAULT_POLICY, json.load(f))
+                chosen = (p, json.load(f))
+            break
         except Exception:
             continue
-    return dict(DEFAULT_POLICY)
+
+    if chosen is None:
+        return dict(DEFAULT_POLICY)
+
+    p, raw = chosen
+    _warn_if_stale(p, raw)
+    return _deep_merge(DEFAULT_POLICY, raw)
+
+
+def _warn_if_stale(policy_path, raw):
+    """命中的 policy 版本低于本 hook 的 VERSION 时，打一行可见警告。
+
+    只警告，不改变行为 —— 因为这个判定本身可能误报
+    （用户可能有意固定使用某个旧版本策略）。
+    """
+    try:
+        got = str(raw.get("_version") or "").strip()
+        here = os.path.dirname(os.path.abspath(__file__))
+        want = open(os.path.join(here, "VERSION"), encoding="utf-8").read().strip()
+        if got and want and got != want:
+            # 只在【全局兜底副本】上警告 —— 包内副本版本不符是打包错误，
+            # 那种情况由 verify_deploy 负责，不在这里重复报。
+            home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+            in_home = os.path.abspath(policy_path).startswith(
+                os.path.abspath(os.path.join(home, ".claude")))
+            if in_home:
+                sys.stderr.write(
+                    "【配置陈旧】正在生效的策略来自全局副本，版本 %s，"
+                    "而当前 hooks 是 %s。\n"
+                    "  生效文件：%s\n"
+                    "  影响：你对包内 policy/behavior-policy.json 的修改【不会生效】，"
+                    "因为全局副本优先级更高。\n"
+                    "  要使用新策略：删除或更新上面那个文件。\n"
+                    % (got, want, policy_path))
+                sys.stderr.flush()
+    except Exception:
+        # 本函数是提示性的，绝不能成为新的崩溃源
+        pass
 
 
 # ---------------------------------------------------------------- 预算解析
