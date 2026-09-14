@@ -25,29 +25,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: 确认零第三方依赖
-        run: |
-          python -c "
-          import pathlib, re, sys
-          allowed = {
-              'argparse','concurrent','datetime','hashlib','importlib','json',
-              'os','pathlib','re','shutil','subprocess','sys','tempfile','time',
-              'winreg','typing','collections','dataclasses','enum','functools',
-              'itertools','math','random','string','textwrap','traceback','uuid',
-              'warnings','io','copy','stat','platform','socket','threading',
-          }
-          local = {'_lib','deploy_files','find_python','intent_gate'}
-          bad = []
-          for p in pathlib.Path('.').rglob('*.py'):
-              for line in p.read_text(encoding='utf-8').splitlines():
-                  m = re.match(r'\s*(?:import|from)\s+([A-Za-z_][\w]*)', line)
-                  if m:
-                      mod = m.group(1)
-                      if mod not in allowed and mod not in local:
-                          bad.append(f'{p}: {mod}')
-          if bad:
-              print('发现第三方依赖：'); [print(' ', b) for b in bad]; sys.exit(1)
-          print('零第三方依赖 ✓')
-          "
+        run: python .github/scripts/check_no_deps.py
 
       - name: 四关自测
         run: python tests/four_gate_selftest.py
