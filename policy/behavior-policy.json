@@ -1,12 +1,13 @@
 {
   "_comment": "行为门策略内核（工具无关）。适配器读取本文件，不硬编码规则。",
-  "_version": "3.5.3",
+  "_version": "3.5.4",
   "_v25_note": "删除 bash_rounds / webfetch 的预算声明 —— 它们从未被执行，是假能力。声明一个不被执行的上限，比不声明更糟。",
   "budget": {
     "agent_spawns": 0,
     "agent_depth": 1,
     "_note": "agent_spawns 有 PreToolUse 强制；agent_depth 有子代理检查。这两个是硬上限。",
     "_removed": "bash_rounds / webfetch 曾声明为 40 / 5，实际本会话用了 143 次 Bash（超 3.6 倍）且门不拦。声明一个不被执行的上限 = 假能力，已删除。",
+    "_removed_status": "3.5.3 已重新引入同类能力，但语义不同：下面是【警告阈值】而非硬上限，由 closeout_gate 实际读取并在越阈时打印一行。见 _warn_note。",
     "bash_warn_at": 300,
     "webfetch_warn_at": 50,
     "_warn_note": "这两个是【警告阈值】，不是硬上限。越过时打印一行提示，不阻断。",

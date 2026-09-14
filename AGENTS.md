@@ -27,7 +27,7 @@
 │       ├─ effect_gate.py          G3 生效门
 │       ├─ destructive_gate.py     G5 危险门
 │       ├─ intent_gate.py          G7 意图门
-│       └─ closeout_gate.py        G6 收口（默认关闭）
+│       └─ closeout_gate.py        G6 收口 + 用量提示
 ├─ lib/
 │   ├─ deploy_files.py             文件部署清单（唯一事实源）
 │   └─ find_python.py              Python 解释器探测
