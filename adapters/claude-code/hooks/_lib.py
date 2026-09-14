@@ -310,7 +310,15 @@ class _Lock(object):
                     return self
                 _time.sleep(0.01)
 
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
+                # ⚠️ NotADirectoryError 必须和 FileNotFoundError 归为一类（跨平台差异）：
+                #   状态目录路径的父级是【文件】时（如 <某文件>/sub）：
+                #     Windows → 抛 FileNotFoundError
+                #     Linux/macOS → 抛 NotADirectoryError
+                #   后者不是 FileNotFoundError 的子类，早先会掉进下面的
+                #   except Exception 分支 → 被当成"未知异常"→ 保守拒绝
+                #   → 用户被【永久卡死】，正是本分支要防的失败模式。
+                #   实测：CI 在 ubuntu/macos 上 6/6 job 失败，Windows 全过。
                 try:
                     os.makedirs(os.path.dirname(self.path), exist_ok=True)
                 except Exception:

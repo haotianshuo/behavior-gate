@@ -1,35 +1,29 @@
 {
   "_comment": "行为门策略内核（工具无关）。适配器读取本文件，不硬编码规则。",
-  "_version": "3.5.0",
+  "_version": "3.5.1",
   "_v25_note": "删除 bash_rounds / webfetch 的预算声明 —— 它们从未被执行，是假能力。声明一个不被执行的上限，比不声明更糟。",
-
   "budget": {
     "agent_spawns": 0,
     "agent_depth": 1,
-
     "_note": "只保留【真正会被执行】的预算。agent_spawns 有 PreToolUse 强制；agent_depth 有子代理检查。",
     "_removed": "bash_rounds / webfetch 曾声明为 40 / 5，实际本会话用了 143 次 Bash（超 3.6 倍）且门不拦。声明一个不被执行的上限 = 假能力，已删除。",
     "_future": "若将来要真限制 Bash，必须先量出合理阈值（当前无数据），并实现 PreToolUse(Bash) 的计数器 —— 而不是先在 policy 里写个数字。"
   },
-
   "effect_gate": {
     "enabled": true,
     "_note": "风险分级：低→L1 / 中→L2 / 高→L3。未声明按中风险从严。",
     "_known_limit": "只检查证据【格式】，不检查证据【真伪】。实测：写 'L3 端到端' 但不真的验证，可以过。",
     "_false_positive": "实测误报率约 1/3 —— 'A已验证 + B未验证' 分属不同段落时会被误判为自相矛盾。"
   },
-
   "destructive_gate": {
     "enabled": true,
     "_note": "防误操作层，不是安全边界。只拦 Bash 命令字符串，拦不住等价的 Python/Node 实现。",
     "_known_bypass": "实测：写 os.remove / shutil.rmtree 的 .py 脚本可以完全绕过 G5（本会话实际发生过）。"
   },
-
   "closeout": {
     "enabled": false,
     "_note": "默认关闭。理由：产出了 27KB 数据但从未被任何人读取。要重新启用，须先证明有人会读它。"
   },
-
   "gateway_budget": {
     "_comment": "跨 harness 的预算层。hook 只在 Claude Code 生效，换客户端后预算要靠网关。",
     "enabled": false,
