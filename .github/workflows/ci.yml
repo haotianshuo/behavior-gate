@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: 测试（${{ matrix.os }} / Python ${{ matrix.python-version }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 确认零第三方依赖
+        run: |
+          python -c "
+          import pathlib, re, sys
+          allowed = {
+              'argparse','concurrent','datetime','hashlib','importlib','json',
+              'os','pathlib','re','shutil','subprocess','sys','tempfile','time',
+              'winreg','typing','collections','dataclasses','enum','functools',
+              'itertools','math','random','string','textwrap','traceback','uuid',
+              'warnings','io','copy','stat','platform','socket','threading',
+          }
+          local = {'_lib','deploy_files','find_python','intent_gate'}
+          bad = []
+          for p in pathlib.Path('.').rglob('*.py'):
+              for line in p.read_text(encoding='utf-8').splitlines():
+                  m = re.match(r'\s*(?:import|from)\s+([A-Za-z_][\w]*)', line)
+                  if m:
+                      mod = m.group(1)
+                      if mod not in allowed and mod not in local:
+                          bad.append(f'{p}: {mod}')
+          if bad:
+              print('发现第三方依赖：'); [print(' ', b) for b in bad]; sys.exit(1)
+          print('零第三方依赖 ✓')
+          "
+
+      - name: 四关自测
+        run: python tests/four_gate_selftest.py
+
+      - name: 安装链路
+        run: python tests/cmd_chain_test.py
+
+      - name: 对抗测试
+        run: python tests/adversarial_test.py
+
+      - name: 预算安全
+        run: python tests/budget_safety_test.py
+
+      - name: 意图门
+        run: python tests/intent_gate_test.py
+
+      - name: 升级路径
+        run: python tests/upgrade_path_test.py
+
+      - name: 版本一致性
+        run: |
+          python -c "
+          import json, pathlib, re, sys
+          v = pathlib.Path('adapters/claude-code/hooks/VERSION').read_text(encoding='utf-8').strip()
+          pol = json.loads(pathlib.Path('policy/behavior-policy.json').read_text(encoding='utf-8'))['_version']
+          print(f'VERSION={v}  policy={pol}')
+          if v != pol:
+              print('版本不一致'); sys.exit(1)
+          print('版本一致性 ✓')
+          "

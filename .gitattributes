@@ -1,0 +1,38 @@
+# 默认：自动检测文本文件，统一使用 LF 行尾
+* text=auto eol=lf
+
+# 显式声明文本文件
+*.py      text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.txt     text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.toml    text eol=lf
+
+# Windows 批处理必须用 CRLF
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# 二进制文件（不做行尾转换）
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.otf     binary
+*.zip     binary
+*.gz      binary
+*.exe     binary
+*.dll     binary
+*.so      binary
+*.dylib   binary
+
+# 锁文件：合并时保留，不参与 diff 统计
+*.lock    -diff linguist-generated
+
+# 语言统计排除
+tests/**  linguist-vendored=false

@@ -1,0 +1,75 @@
+name: 缺陷报告
+description: 报告一个可复现的缺陷
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **请勿在本表单中提交密钥、Cookie、私有 URL 或个人数据。**
+        安全漏洞请走 [SECURITY.md](../blob/main/SECURITY.md) 的私有渠道。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 见 `adapters/claude-code/hooks/VERSION`
+      placeholder: "3.5.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python 版本
+      placeholder: "3.12.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 实际行为 vs 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现步骤
+      description: 请尽量提供可直接执行的命令
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: 相关输出
+      description: 报错信息、hook 的 stderr、exit code
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认这不是 [install.md](../blob/main/install.md) 中「已知边界」列出的情况
+          required: true
+        - label: 我已搜索过现有 Issue，没有重复
+          required: true

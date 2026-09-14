@@ -1,0 +1,48 @@
+name: 功能建议
+description: 建议一个新功能或改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目有一条硬约束：**不为「看起来先进」而增加机制**。
+        新功能需要回答下面的问题。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 它解决哪个真实问题？
+      description: 请描述**实际发生过**的失败，而不是假想的场景
+    validations:
+      required: true
+
+  - type: textarea
+    id: existing
+    attributes:
+      label: 现有能力为什么不够？
+      description: 本项目已有 5 道门 + 策略内核，请说明为什么它们覆盖不了
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你的方案
+    validations:
+      required: true
+
+  - type: textarea
+    id: minimal
+    attributes:
+      label: 能不能用更小的改动解决？
+      description: 例如改 policy 配置而不是加新门
+    validations:
+      required: true
+
+  - type: textarea
+    id: removal
+    attributes:
+      label: 以后如何删除或回退？
+    validations:
+      required: true

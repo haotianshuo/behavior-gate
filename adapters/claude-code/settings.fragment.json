@@ -1,0 +1,83 @@
+{
+  "_comment": "合并进目标 settings 的 hooks 段。不要整体覆盖 —— 已有 hook 必须保留。",
+  "_matcher_note": "matcher 用的工具名来自实测穷举（13047 Bash / 127 Agent / 2069 Edit / 514 Write）。派生工具叫 Agent，不是 Task。写 Task 匹配不到任何东西；写 Task.* 正则会误伤 TaskCreate/TaskUpdate/TaskStop/TaskList 这四个待办清单工具。",
+  "_command_note": "{{HOOKS}} 和 {{PYTHON}} 都由 install.py 替换。用【python 绝对路径直接调用】而不是经 cmd.exe —— 实测经 cmd.exe 时 Git Bash 会把它带进交互模式，hook 静默失效。python 路径必须【安装时探测】，不能写死（换机后版本/位置可能不同）。",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/inject_budget.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/budget_gate.py\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/closeout_gate.py\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/destructive_gate.py\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/closeout_gate.py\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "_note": "G7 意图门：治 P1-4（用户说过『不要再问』仍弹询问）和 P2-3（用户说过『不用测』仍跑测试）。只认本会话用户原话，可用 questions: on / verify: on 覆盖。",
+        "matcher": "AskUserQuestion|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/intent_gate.py\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "_note": "只挂【写入/执行类】MCP 工具，不扫全部 MCP —— 全量扫描会误伤只读查询。",
+        "matcher": "mcp__.*__(write|create|edit|delete|remove|move|rename|put|upload|update|execute|exec|run|bash|shell|terminal).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/destructive_gate.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{PYTHON}}\" \"{{HOOKS}}/effect_gate.py\"",
+            "timeout": 8
+          }
+        ]
+      }
+    ]
+  }
+}
