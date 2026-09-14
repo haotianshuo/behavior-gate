@@ -47,3 +47,6 @@ jobs:
 
       - name: 版本一致性
         run: python .github/scripts/check_version_consistency.py
+
+      - name: 死段检测
+        run: python .github/scripts/check_dead_policy.py

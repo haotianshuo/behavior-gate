@@ -221,6 +221,58 @@ MUST_APPEAR = {
 }
 
 
+def check_dead_sections(policy, hooks_dir):
+    """检查 policy 里有没有【没有任何代码读】的段（#36 新增）。
+
+    为什么加这个：
+      本项目历史上出现过两次同形状的缺陷 ——
+        · bash_rounds / webfetch 声明上限，但没有拦截器（假能力）
+        · closeout.enabled 写 false，但门不读它、无条件运行（#31）
+      两次都是靠人事后扫描发现的。而 policy 的注释里写着
+      「装一个不生效的开关比没有开关更糟」—— 说明概念早就有，只是没有机械检查。
+
+      人扫一次能发现问题，但【挡不住下一次】。所以做成自动的。
+
+    判定方法：
+      段名（如 "closeout"）在 hooks 目录的 .py 文件里必须至少被引用一次。
+      只出现在 policy 文件自身、注释、或字符串里不算数吗？——
+      算。因为门读它时必然要写出字面量段名（policy.get("closeout")）。
+      实测的两次缺陷都是 0 处引用。
+
+    为什么不直接删掉死段：
+      删掉是修复手段之一，但【先要让人看见】。自动报出来之后，
+      由人决定是删掉、还是接上实现。见 #36 的处理。
+    """
+    problems = []
+    if not policy or not hooks_dir or not os.path.isdir(hooks_dir):
+        return problems
+
+    # 只统计真正的 hook 脚本，不含测试与工具
+    sources = []
+    for name in os.listdir(hooks_dir):
+        if name.endswith(".py"):
+            p = os.path.join(hooks_dir, name)
+            try:
+                sources.append(open(p, encoding="utf-8").read())
+            except Exception:
+                pass
+    blob = "\n".join(sources)
+
+    for section in policy:
+        if section.startswith("_"):
+            continue
+        # 段名作为字面量出现（单双引号都算）
+        if ('"%s"' % section) in blob or ("'%s'" % section) in blob:
+            continue
+        problems.append(
+            "DEAD     策略段没有任何 hook 读取: %s\n"
+            "           在 %s 下的 .py 里找不到段名 %r 的字面量引用。\n"
+            "           这是「假能力」的一种：声明存在，但永远不会生效。\n"
+            "           处理：要么删掉该段，要么接上实现 —— 不要留着。"
+            % (section, hooks_dir, section))
+    return problems
+
+
 def check_effective(policy):
     problems = []
     if policy is None:
@@ -265,6 +317,10 @@ def main():
     file_problems = compare_files(src, dst)
     policy, perr = load_effective_policy(a.installed)
     eff_problems = check_effective(policy) if perr is None else [perr]
+    # 死段检测（#36）：policy 里声明了但没有任何 hook 读的段。
+    # 在【源】上检查而不是已安装副本 —— 这是打包期问题，不是部署问题。
+    if policy is not None:
+        eff_problems += check_dead_sections(policy, a.source)
 
     # ⚠️ "找不到已安装的 _lib.py" 不算漂移（实测踩到）。
     #    它的意思就是【还没装】—— 而"把它装上"正是安装要做的事。
