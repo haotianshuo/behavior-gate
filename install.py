@@ -49,6 +49,19 @@ except Exception:
 # 也从同一个模块取 —— 两边各写一份规则，已经不一致过两次。
 from deploy_files import is_tracked  # noqa: E402
 
+# --- 控制台编码（可移植性）---
+# Windows 控制台默认 GBK(cp936)；print 中文时遇到非 GBK 字符会抛
+# UnicodeEncodeError，脚本直接崩。实测：CI 在 windows-latest 上必崩，
+# ubuntu/macos 正常 —— 本地 Git Bash 恰好是 UTF-8，所以看不见。
+# 详见 lib/console_utf8.py。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+# --- end ---
+
+
 SRC_HOOKS = os.path.join(HERE, "adapters", "claude-code", "hooks")
 SRC_FRAG = os.path.join(HERE, "adapters", "claude-code", "settings.fragment.json")
 SRC_POLICY = os.path.join(HERE, "policy", "behavior-policy.json")

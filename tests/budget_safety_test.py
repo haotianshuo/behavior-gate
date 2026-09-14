@@ -7,6 +7,19 @@ BUG-3 只认中文        —— 英文 prompt 完全不被识别（用户工作
 """
 import json, os, subprocess, sys, tempfile
 
+# --- 控制台编码（可移植性）---
+# Windows 控制台默认 GBK(cp936)；print 中文时遇到非 GBK 字符会抛
+# UnicodeEncodeError，脚本直接崩。实测：CI 在 windows-latest 上必崩，
+# ubuntu/macos 正常 —— 本地 Git Bash 恰好是 UTF-8，所以看不见。
+# 详见 lib/console_utf8.py。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+# --- end ---
+
+
 H = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                  "adapters", "claude-code", "hooks")
 PY = sys.executable

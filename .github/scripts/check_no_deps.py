@@ -32,6 +32,40 @@ LOCAL = {"_lib", "deploy_files", "find_python", "intent_gate"}
 IMPORT_RE = re.compile(r"\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def strip_docstrings(text):
+    """去掉三引号字符串内容。
+
+    为什么必须做：文档字符串和示例里会出现 import 语句，例如
+        '''用法：from console_utf8 import force_utf8_console'''
+    按行扫会把它当成真实依赖。实测误报：本脚本曾把
+    lib/console_utf8.py 自己的文档示例报成第三方依赖。
+    """
+    out = []
+    in_str = False
+    quote = None
+    for line in text.splitlines():
+        if not in_str:
+            for q in ('"""', "'''"):
+                if q in line:
+                    before, _, after = line.partition(q)
+                    out.append(before)
+                    in_str, quote = True, q
+                    # 同一行内闭合
+                    if q in after:
+                        _, _, rest = after.partition(q)
+                        out.append(rest)
+                        in_str = False
+                    break
+            else:
+                out.append(line)
+        else:
+            if quote in line:
+                _, _, after = line.partition(quote)
+                out.append(after)
+                in_str = False
+    return "\n".join(out)
+
+
 def main():
     # Windows 上强制 UTF-8 输出，避免 GBK 编解码失败
     try:
@@ -54,7 +88,7 @@ def main():
         except UnicodeDecodeError:
             bad.append((str(path.relative_to(root)), "<not-utf8>"))
             continue
-        for line in text.splitlines():
+        for line in strip_docstrings(text).splitlines():
             m = IMPORT_RE.match(line)
             if not m:
                 continue

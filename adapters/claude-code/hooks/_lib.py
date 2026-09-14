@@ -21,6 +21,35 @@ import time as _time
 import shutil as _shutil
 import tempfile
 
+
+# ---------------------------------------------------------------- 控制台编码
+#
+# Windows 控制台默认编码是 GBK(cp936)。门的所有告警都是中文，如果 stderr
+# 没被设成 UTF-8，分两种情况：
+#   1. 输出全是 GBK 不可编码的字符 → UnicodeEncodeError → 门直接崩；
+#   2. 能编码 → 字节流是 GBK，而消费方（测试、CI、用户终端）按 UTF-8 读
+#      → 看到【乱码告警】。
+#
+# 实测（#28）：budget_gate 的「状态目录无法创建」告警在 Windows 上输出为
+#   `��G1 Ԥ���š�...` —— 用户看到的是乱码，等于告警没说清楚。
+#   deny() / warn_inactive() 各自有 reconfigure，但 _Lock 里的两条
+#   stderr.write 是裸写的，漏了。
+#
+# 修法：在【模块加载时】统一设置一次，而不是指望每个调用点自觉。
+# 漏一处的代价就是用户看到乱码，这种事不该靠人工纪律。
+def _force_utf8_console():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # 流不支持 reconfigure（被包装 / 老版本 Python）：跳过。
+            # 本函数不能成为新的崩溃源。
+            pass
+
+
+_force_utf8_console()
+
+
 # ---------------------------------------------------------------- 基础 IO
 
 def read_input():
