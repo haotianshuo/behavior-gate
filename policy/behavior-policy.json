@@ -1,6 +1,6 @@
 {
   "_comment": "行为门策略内核（工具无关）。适配器读取本文件，不硬编码规则。",
-  "_version": "3.5.7",
+  "_version": "3.5.8",
   "_v25_note": "删除 bash_rounds / webfetch 的预算声明 —— 它们从未被执行，是假能力。声明一个不被执行的上限，比不声明更糟。",
   "_removed_sections": "3.5.6 删除 gateway_budget 整段。它是同一个毛病的第三次出现：声明了但没有任何 hook 读它。它自己的注释写着「装一个不生效的开关比没有开关更糟」—— 而它正是那个开关。用户把它改成 true 也不会有任何事发生，这是个陷阱。跨工具边界已正确记录在 README 的「刻意不做的」段，不需要伪装成配置项。",
   "budget": {
@@ -24,7 +24,16 @@
   "destructive_gate": {
     "enabled": true,
     "_note": "防误操作层，不是安全边界。只拦 Bash 命令字符串，拦不住等价的 Python/Node 实现。",
-    "_known_bypass": "实测：写 os.remove / shutil.rmtree 的 .py 脚本可以完全绕过 G5（本会话实际发生过）。"
+    "_known_bypass": "实测：写 os.remove / shutil.rmtree 的 .py 脚本可以完全绕过 G5（本会话实际发生过）。",
+    "cmd_deny": [],
+    "content_deny": [],
+    "_custom_rules_help": "在这里加自定义拦截规则。留空数组则使用内置规则。",
+    "_custom_rules_format": "每条规则必须是字典：{\"id\": \"规则名\", \"pattern\": \"正则\", \"why\": \"为什么要拦\", \"instead\": \"该改用什么写法\"}。id 和 pattern 必填 —— 缺任何一个都会被【跳过】并在 stderr 打出可见警告。",
+    "_custom_rules_example": "{\"id\": \"no_prod_db\", \"pattern\": \"\\\\bprod-db\\\\b\", \"why\": \"禁止直连生产库\", \"instead\": \"用只读副本\"}",
+    "_custom_rules_scope": "cmd_deny 作用于 Bash 的 command 与 MCP 输入；content_deny 作用于 Edit/Write 的内容。",
+    "_custom_rules_merge": "留空数组 [] 表示【使用内置规则】（空数组会被当作 falsy，回退到内置）。要【追加】自己的规则同时保留内置 —— 目前不支持，只能整组替换：填入非空数组会完全替换内置规则。这是当前实现的边界，不是设计意图。",
+    "warn_patterns": [],
+    "_warn_patterns_note": "只警告不拦截的规则，格式与 cmd_deny 相同。"
   },
   "closeout": {
     "enabled": true,

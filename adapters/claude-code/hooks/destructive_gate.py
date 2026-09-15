@@ -93,14 +93,44 @@ WARN = [
 ]
 
 
-def _compile(rules):
+def _compile(rules, where="?"):
+    """编译规则表。**失败必须可见**（3.5.8 修复，#41）。
+
+    修前这里是 `except Exception: continue` —— 静默跳过任何编不过的规则。
+    后果（实测）：用户往 policy 里加自定义规则时，只要格式有一点不对
+    （写成字符串列表、忘了 id 字段……），规则就被【无声忽略】，
+    门照常放行，用户以为规则生效了。
+
+    这正是本项目要消灭的模式：**看起来配了，其实没配**。
+    EXCEPT 本身不能删（一条坏规则不该让整个门崩），
+    但它必须把「哪条被跳过、为什么」说给用户听。
+
+    合法规则格式（照内置 CMD_DENY 的结构）：
+        {"id": "...", "pattern": "正则", "why": "...", "instead": "..."}
+    """
     out = []
-    for r in rules:
+    for i, r in enumerate(rules or []):
         try:
+            if not isinstance(r, dict):
+                raise TypeError(
+                    "规则必须是字典 {id, pattern, why, instead}，"
+                    "实际是 %s：%r" % (type(r).__name__, r))
+            if "pattern" not in r:
+                raise KeyError("缺少必填字段 'pattern'")
+            if "id" not in r:
+                raise KeyError("缺少必填字段 'id'（命中时要用它报出规则名）")
             flags = re.I | (re.M if r.get("line_anchored") else 0)
             out.append((r, re.compile(r["pattern"], flags)))
-        except Exception:
-            continue
+        except Exception as e:
+            # 可见 —— 但只警告一次每条，不阻断（一条坏规则不该让门失效）
+            sys.stderr.write(
+                "[G5 配置警告] %s 的第 %d 条规则被【跳过】，它不会生效：\n"
+                "  规则内容：%r\n"
+                "  原因：%s\n"
+                "  合法格式：{\"id\": \"...\", \"pattern\": \"正则\", "
+                "\"why\": \"...\", \"instead\": \"...\"}\n"
+                % (where, i, r, e))
+            sys.stderr.flush()
     return out
 
 
@@ -114,9 +144,15 @@ def main():
     if not dgate.get("enabled", True):
         allow()
 
-    cmd_rules = _compile(dgate.get("cmd_deny") or CMD_DENY)
-    content_rules = _compile(dgate.get("content_deny") or CONTENT_DENY)
-    warn_rules = _compile(dgate.get("warn_patterns") or WARN)
+    cmd_rules = _compile(dgate.get("cmd_deny") or CMD_DENY,
+                         "policy.destructive_gate.cmd_deny"
+                         if dgate.get("cmd_deny") else "内置 CMD_DENY")
+    content_rules = _compile(dgate.get("content_deny") or CONTENT_DENY,
+                             "policy.destructive_gate.content_deny"
+                             if dgate.get("content_deny") else "内置 CONTENT_DENY")
+    warn_rules = _compile(dgate.get("warn_patterns") or WARN,
+                          "policy.destructive_gate.warn_patterns"
+                          if dgate.get("warn_patterns") else "内置 WARN")
 
     # 按工具决定用哪套规则 —— 这是本次修复的核心
     if tool == "Bash":
