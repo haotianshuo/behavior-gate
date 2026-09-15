@@ -27,7 +27,9 @@ ALLOWED = {
 }
 
 # 本项目内部模块
-LOCAL = {"_lib", "deploy_files", "find_python", "intent_gate"}
+# （加新模块时记得同时加到这里 —— 否则 CI 会把它误报成第三方依赖）
+LOCAL = {"_lib", "deploy_files", "find_python", "intent_gate",
+         "src_identity", "console_utf8", "source_identity"}
 
 IMPORT_RE = re.compile(r"\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)")
 

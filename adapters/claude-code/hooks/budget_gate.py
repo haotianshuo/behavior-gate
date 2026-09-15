@@ -49,7 +49,9 @@ def main():
             "        （审计实测：75 次派生中 40 次即 53%% 发生在子代理内部，\n"
             "         WebFetch 的 96%% 消耗在子代理内）。\n"
             "  请改用：在当前子代理内直接完成，或把结论返回给主对话。"
-            % (agent_id, policy["budget"].get("agent_depth", 1))
+            % (agent_id, policy["budget"].get("agent_depth", 1)),
+            gate_id="G1", rule_id="nested_agent_denied",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     # --- 配额检查 + 递增：必须在同一个临界区内 ---
@@ -96,7 +98,9 @@ def main():
             "  这不是能力限制：预算是「不允许超」的语义，\n"
             "  上限读不出来时放行，等于放弃配额。\n"
             "  请检查状态文件中的 agent_spawns 是否为整数：%s"
-            % path
+            % path,
+            gate_id="G1", rule_id="cap_invalid",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     if res == "ENV_UNAVAILABLE":
@@ -116,7 +120,9 @@ def main():
             "  这不是能力限制：预算是「不允许超」的语义，\n"
             "  不知道锁有没有拿到时放行，等于放弃计数。\n"
             "  请稍等片刻重试。若频繁出现，检查残留锁目录：%s.lock"
-            % path
+            % path,
+            gate_id="G1", rule_id="lock_unknown",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     if res in ("STATE_SAVE_FAILED", "STATE_UNREADABLE"):
@@ -127,7 +133,9 @@ def main():
             "  这不是能力限制 —— 预算是「不允许超」的语义，\n"
             "  状态不可信时放行等于放弃计数。\n"
             "  请稍等片刻重试。若频繁出现，检查 %s"
-            % (res, path)
+            % (res, path),
+            gate_id="G1", rule_id="state_unreadable",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     if res == "LOCK_TIMEOUT":
@@ -140,7 +148,9 @@ def main():
             "  拿不到锁时放行等于放弃计数。\n"
             "  请稍等片刻重试，或改为自己直接完成。\n"
             "  若频繁出现，检查残留锁目录：%s.lock"
-            % (path, path)
+            % (path, path),
+            gate_id="G1", rule_id="lock_unavailable",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     if res == "LOCK_PREEMPTED":
@@ -154,7 +164,9 @@ def main():
             "  此时放行等于用一个不可信的计数做决定。\n"
             "  请稍等片刻重试，或改为自己直接完成。\n"
             "  若频繁出现，检查残留锁目录：%s.lock"
-            % (path, path)
+            % (path, path),
+            gate_id="G1", rule_id="lock_preempted",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     verdict, used, cap = res
@@ -179,7 +191,9 @@ def main():
             "     停下来一段话就说清了。先试这个。\n"
             "  2. 确实需要并行 —— 停下来告诉用户「我需要 N 个子代理做 X，原因是 Y」，\n"
             "     由用户在 prompt 里写一行 `agent_spawns: N` 放行。\n"
-            % (who, desc)
+            % (who, desc),
+            gate_id="G1", rule_id="spawn_budget_exceeded",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     if verdict == "DENY_EXHAUSTED":
@@ -188,7 +202,9 @@ def main():
             "  你想派：%s（%s）\n"
             "  超出预算的唯一合法动作：停下 → 报告 → 问。\n"
             "  需要更多预算，请让用户在 prompt 里写 `agent_spawns: <更大的数>`。"
-            % (used, cap, who, desc)
+            % (used, cap, who, desc),
+            gate_id="G1", rule_id="spawn_budget_exhausted",
+            tool="Agent", session_id=data.get("session_id"),
         )
 
     allow()

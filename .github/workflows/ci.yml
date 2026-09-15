@@ -45,8 +45,23 @@ jobs:
       - name: 升级路径
         run: python tests/upgrade_path_test.py
 
+      - name: G5 真实回归
+        run: python tests/g5_real_regression_test.py
+
+      - name: 源身份一致性回归
+        run: python tests/source_identity_consistency_test.py
+
+      - name: Gate 事件记录
+        run: python tests/gate_events_test.py
+
       - name: 版本一致性
         run: python .github/scripts/check_version_consistency.py
 
       - name: 死段检测
         run: python .github/scripts/check_dead_policy.py
+
+      # ⚠️ 只读检查 —— 绝不带 --write。
+      #    CI 自动刷新源身份 = 任何提交都能把自己「合法化」，
+      #    声明立刻失去意义。写操作只能由人显式发起。
+      - name: 源身份只读校验
+        run: python tools/source_identity.py

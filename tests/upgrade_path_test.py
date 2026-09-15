@@ -193,14 +193,38 @@ def main():
 
     print("\n===== 场景：hooks 下的子目录必须能被安装 =====")
     # ⚠️ 与 .json 的扩展名不对称同类，只是换了"递归 vs 顶层"这根轴。
-    subdir = os.path.join(ROOT, "adapters", "claude-code", "hooks", "subprobe")
+    #
+    # ⚠️ 隔离副本（3.5.10 / #49）——
+    #    本场景要往 hooks/ 里加一个新文件来验证递归安装。
+    #    直接改真实源目录会让源快照变化而声明没更新 → 判 UNPROVEN。
+    #    那是机制在正确工作（源变了就该刷身份），但测试不该为了
+    #    "造一个场景"而去改仓库的真实源身份。
+    #
+    #    做法：把整个包复制到临时目录，在【副本】里加子目录，
+    #    并在副本内用真实计算函数生成与 fixture 匹配的 SOURCE_IDENTITY。
+    #    仓库的 SOURCE_IDENTITY.json 全程不被触碰。
+    mold = os.path.join(stage, "pkgcopy")
+    shutil.copytree(ROOT, mold,
+                    ignore=shutil.ignore_patterns(
+                        ".git", "__pycache__", ".claude",
+                        "DEPLOY_MANIFEST.json", "*.bak-*"))
+    mhooks = os.path.join(mold, "adapters", "claude-code", "hooks")
+    subdir = os.path.join(mhooks, "subprobe")
     os.makedirs(subdir, exist_ok=True)
     open(os.path.join(subdir, "helper_probe.py"), "w").write("# probe\n")
+
+    # 用真实函数刷新【副本内】的源身份 —— 复用同一套算法，不手抄。
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import src_identity as _sid  # noqa: E402
+    _ok, _msg = _sid.write_identity(
+        os.path.join(mold, "adapters", "claude-code"), mhooks)
+
     try:
         proj3 = os.path.join(stage, "subproj")
-        r = subprocess.run([PY, os.path.join(ROOT, "install.py"),
+        r = subprocess.run([PY, os.path.join(mold, "install.py"),
                             "--project", proj3, "--apply"],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=ROOT)
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           cwd=mold)
         out = r.stdout.decode("utf-8", "replace")
         ck("含子目录时安装通过", r.returncode == 0,
            "rc=%d %s" % (r.returncode, out[-300:]))
@@ -208,8 +232,14 @@ def main():
            os.path.isfile(os.path.join(proj3, ".claude", "hooks", "subprobe",
                                        "helper_probe.py")),
            out[-200:])
+        # 顺带断言：仓库真实源身份没被这次测试改动
+        ck("仓库真实 SOURCE_IDENTITY 未被本次测试改动",
+           _sid.check(os.path.join(ROOT, "adapters", "claude-code"),
+                      os.path.join(ROOT, "adapters", "claude-code",
+                                   "hooks"))["ok"],
+           "仓库源身份在测试后仍应自证通过")
     finally:
-        shutil.rmtree(subdir, ignore_errors=True)
+        shutil.rmtree(mold, ignore_errors=True)
 
     print("\n" + "=" * 64)
     ok = sum(1 for _, c, _ in res if c)

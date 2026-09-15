@@ -153,7 +153,9 @@ def main():
             "  这比弹一个必须点选的框更轻。\n"
             "\n"
             "  如果用户刚刚明确授权你询问，让他写 `questions: on`。"
-            % (first or "(未提供问题文本)")
+            % (first or "(未提供问题文本)"),
+            gate_id="G7", rule_id="questions_disabled",
+            tool=tool, session_id=data.get("session_id"),
         )
 
     # ---- P2-3：拦测试 ----
@@ -171,7 +173,9 @@ def main():
                 "  用户已经豁免了这个维度。请直接交付结果。\n"
                 "  如果确实需要验证，先说明「为什么这次必须验证」，\n"
                 "  由用户写 `verify: on` 放行。"
-                % cmd[:150]
+                % cmd[:150],
+                gate_id="G7", rule_id="verification_disabled",
+                tool=tool, session_id=data.get("session_id"),
             )
 
     allow()

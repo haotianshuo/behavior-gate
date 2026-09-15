@@ -83,8 +83,17 @@ def emit_text(text):
     sys.stdout.flush()
 
 
-def deny(reason, hook_event="PreToolUse"):
-    """阻断【工具调用】（PreToolUse 家族）。用 exit 2。"""
+def deny(reason, hook_event="PreToolUse", gate_id=None, rule_id=None,
+         tool=None, session_id=None):
+    """阻断【工具调用】（PreToolUse 家族）。用 exit 2。
+
+    gate_id / rule_id 是【可选的记录参数】—— 传了就把这次 deny
+    记进 gate-events.jsonl。**记录失败不影响这里的判定**（见
+    record_gate_event 的 fail policy）。
+    """
+    if gate_id:
+        record_gate_event(gate_id, rule_id or "unspecified", "deny",
+                          tool=tool, session_id=session_id)
     try:
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
@@ -101,7 +110,8 @@ def deny(reason, hook_event="PreToolUse"):
     sys.exit(2)
 
 
-def deny_stop(reason):
+def deny_stop(reason, gate_id=None, rule_id=None, tool=None,
+              session_id=None):
     """阻断【停止】（Stop / SubagentStop）。
 
     与工具事件是不同的 schema —— 这一点极易写错：
@@ -111,7 +121,12 @@ def deny_stop(reason):
     写错的后果不是"语义不精确"，而是【门失效】：
     官方文档明确说，解析出的对象 schema 校验失败属于【非阻断错误】——
     动作照常进行，Claude 照常停止。也就是这道门看起来装了、其实没装。
+
+    gate_id / rule_id 是【可选的记录参数】，用法同 deny()。
     """
+    if gate_id:
+        record_gate_event(gate_id, rule_id or "unspecified", "stop_feedback",
+                          tool=tool, session_id=session_id)
     try:
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
@@ -134,6 +149,126 @@ def warn_inactive(gate_name, why):
 
 def allow():
     sys.exit(0)
+
+
+# ---------------------------------------------------------------- Gate 事件记录
+#
+# 真实问题（CONFIRMED）：
+#   为了分析一次真实使用里到底拦了什么，需要反向扫描约 3.5 万条消息 ——
+#   因为门【不记录自己的决定】。closeout_gate 记的是「工具调用」，
+#   不是「哪道门的哪条规则做了 deny」。
+#   于是 G1/G3/G5/G7 的真实收益与误伤长期无法测量（NOT_MEASURED）。
+#
+# 这一层只做一件事：**把门已经做出的决定，用结构化方式记下来**。
+#
+# ⚠️ 它绝【不】参与判定。观测层不改变产品语义：
+#      · 记录失败 → 仍按原判定执行（deny 还是 deny，allow 还是 allow）
+#      · 记录失败 → 绝不抛异常、绝不 sys.exit
+#      · 默认不记 allow（只用记「门真的出手了」的时刻）
+#
+# ⚠️ 边界（T1 本地观测证据，必须在代码里说清）：
+#     证明  ：本机 Gate 代码记录了自己做出的决定
+#     不证明：日志不可修改 / 不可伪造 / 攻击者不能删除 / 事件不可抵赖
+#     不表示：事件一定代表真实世界风险（门只做字符串匹配）
+#     T2 malicious-writer-proof → OUT_OF_SCOPE
+#     T3 non-repudiation        → OUT_OF_SCOPE
+#
+# 刻意不做：hash chain / 签名 / 数据库 / attestation / 远端 telemetry。
+#           本地观测不需要这些；加了就是把「看见行为」伪装成「可信审计」。
+
+GATE_EVENTS_FILE = "gate-events.jsonl"
+
+# 只接受明确枚举。非法值回落 UNKNOWN —— 不让脏值污染统计分母。
+SOURCE_CLASSES = ("NATURAL", "CONTROLLED", "UNKNOWN")
+
+
+def source_class():
+    """事件来源分类。
+
+    默认 NATURAL（真实日常开发自然发生）。
+    测试 harness 可显式设 BEHAVIOR_GATE_SOURCE_CLASS=CONTROLLED。
+
+    ⚠️ 这是【测试 harness 能力】，不是用户产品功能 —— 不写进用户文档、
+       不让普通用户学这个配置。非法值一律 UNKNOWN，不猜测。
+    """
+    v = (os.environ.get("BEHAVIOR_GATE_SOURCE_CLASS") or "").strip().upper()
+    return v if v in SOURCE_CLASSES else ("UNKNOWN" if v else "NATURAL")
+
+
+def _read_version_file():
+    """读同目录 VERSION。失败返回 None —— 不让身份读取影响记录。"""
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+
+def _read_source_snapshot():
+    """读部署侧清单里的 sourceSnapshot。
+
+    ⚠️ 这是「产生这条事件的代码属于哪份源码快照」—— 没有它，
+       跨多个快照累积后又会回到「这次误报究竟是哪份代码产生的」。
+       读失败返回 None，事件照写（不因身份读取失败而丢事件）。
+    """
+    try:
+        d = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        p = os.path.join(d, "DEPLOY_MANIFEST.json")
+        with open(p, "r", encoding="utf-8") as f:
+            return (json.load(f) or {}).get("sourceSnapshot")
+    except Exception:
+        return None
+
+
+def record_gate_event(gate_id, rule_id, decision, tool=None,
+                      session_id=None, extra=None):
+    """记录一次真实 Gate 干预。**永不抛异常、永不改变判定。**
+
+    只记「门出手了」的事件（deny / block / stop_feedback），不记 allow。
+
+    ⚠️ 绝不写入：完整 prompt / assistant 输出 / 完整 command /
+       Write·Edit 正文 / MCP payload / 环境变量值 / 任何密钥。
+
+    并发：多个匹配的 hook 会并行执行，所以 append 必须持锁。
+         复用 _Lock（已处理 Windows 的 mkdir 竞态与陈旧锁）。
+    """
+    try:
+        ev = {
+            "ts": _time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "session": (session_id or "nosession")[:120],
+            "gate_id": gate_id,
+            "rule_id": rule_id,
+            "decision": decision,
+            "tool": tool,
+            "source_class": source_class(),
+            "version": _read_version_file(),
+            "source_snapshot": _read_source_snapshot(),
+        }
+        if extra:
+            # 只允许标量补充字段，防止有人顺手把大块正文塞进来
+            for k, v in extra.items():
+                if isinstance(v, (str, int, float, bool)) or v is None:
+                    ev[k] = v if not isinstance(v, str) else v[:120]
+        line = json.dumps(ev, ensure_ascii=False) + "\n"
+
+        path = os.path.join(state_dir(), GATE_EVENTS_FILE)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            return False
+
+        lock = _Lock(path + ".lock")
+        with lock:
+            if not lock.held:
+                return False        # 拿不到锁就不记 —— 但绝不阻塞判定
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        return True
+    except Exception:
+        # 观测层永远不能成为门的故障点。静默失败是有意的：
+        # 这里往上抛会把一次本该干净的 deny 变成脚本崩溃。
+        return False
 
 
 # ---------------------------------------------------------------- 状态文件

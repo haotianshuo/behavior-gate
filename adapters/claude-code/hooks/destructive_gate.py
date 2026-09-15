@@ -28,6 +28,68 @@ from _lib import read_input, deny, allow, load_policy, warn_inactive  # noqa: E4
 
 
 # ---- 只在【会被执行】的上下文里拦（Bash command / MCP input）----
+
+# ⚠️ 共享的 rm 选项解析片段（3.5.10 修复，见 #48）。
+#
+#   问题（由真实会话 + 真实子进程发现）：
+#     三条同族规则各自抄了一份选项解析 ——
+#         rm_rf_traversal / rm_rf_windows_drive / rm_rf_windows_env
+#     抄的是同一个有缺陷的写法：
+#         (-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+
+#     它有三个洞：
+#       ① 没有结尾锚定 → `rm -rf /tmp/v350` 被前缀贪婪匹配成 `rm -rf /`
+#          （真实误报：本机 09-15 09:51 拦过一次正常的临时目录清理）
+#       ② 不认短选项分离 → `rm -r -f /` 放行（真删根目录）
+#       ③ 不认大写 R    → `rm -Rf /`  放行（同上）
+#
+#   取舍：抽成共享片段，而不是在三条规则里各抄一份新正则。
+#   依据本项目 #19 / #38 的教训 —— 同一条规则只在一侧修好，另一侧漏掉，
+#   是这个项目反复出现的失败形状。
+#
+#   语义（保持与原规则一致，不扩大范围）：
+#     只有当【选项序列里出现过含 r/R 的选项】且【目标恰好是根】时才命中。
+#     `rm -f /`（非递归）依旧放行 —— 那不是递归删除。
+#
+#   两个 lookahead 的分工：
+#     (?=...)  确认选项序列里确实有 r/R（否则 rm -f / 会被误拦）
+#     (?:...)  吃掉完整的选项序列，让后面的路径锚定生效
+_RM_OPTS = (r"(?=(?:-{1,2}\S+\s+)*-\S*[rR]\S*\s)"   # 必须含递归标志
+            r"(?:-{1,2}\S+\s+)+")                    # 吃掉全部选项
+_RM_ROOT_TAIL = r"(\s|$|\*)"                         # 结尾锚定：恰好是根
+
+
+# ⚠️ 不变量（3.5.10 / #48 确立）：**每条规则只作用于语义对应的字段**。
+#
+#   字段语义矩阵 —— 改规则前先看这张表，别把规则放进不对的字段：
+#
+#     可执行上下文（cmd_deny，真会被执行）
+#       Bash.command
+#       MCP.*.command / MCP.*.path / 其他非内容字段
+#
+#     写入内容（content_deny，只是写下来）
+#       Edit / Write / MultiEdit 的 content / new_string
+#       MCP.*.content / MCP.*.text / MCP.*.body
+#
+#   判据：`content` 字段 = 写入的内容，不是正在执行的命令。
+#   写文件时提到 `pkill` 是「写入内容」，不是「执行命令」——
+#   所以它只过 content_deny。
+#
+#   为什么把这条写进代码而不只写进测试：
+#     3.5.10 之前 MCP 通道用 `cmd_rules + content_rules` 混扫 repr(ti)，
+#     导致 cmd 类规则在 content 字段命中（实测：MCP 写文件含 pkill 被
+#     fuzzy_kill 拦住）。这类「规则放错字段」的问题不会让任何现有测试变红，
+#     只有把不变量写在规则定义旁边，才可能在 review 时被看见。
+#
+#   ⚠️ 已知边界（3.5.10 / #48 实测确认，有意保留）：
+#     字段分离后，【写入内容】里的 Windows 盘符删根命令不再被拦：
+#         MCP 写文件 content = "rm -rf D:/"      → 放行
+#         MCP 写文件 content = "rm -rf C:/Users" → 放行
+#     原因：content 字段只过 CONTENT_DENY，而 rm_rf_in_content 只覆盖
+#           (/|~|$HOME)，不含盘符；rm_rf_windows_drive 是 cmd 规则。
+#     注意 Edit / Write 工具【一直】就是这个行为 —— 不是本轮新造的不一致，
+#     而是把 MCP 对齐到了 Edit/Write 的既有语义。
+#     取舍：写文件的内容不直接执行；要拦「真会执行的命令」，
+#           那是 Bash / MCP.command 通道的职责，那里盘符覆盖是完整的。
 CMD_DENY = [
     {
         "id": "fuzzy_kill",
@@ -39,8 +101,12 @@ CMD_DENY = [
     },
     {
         "id": "rm_rf_traversal",
-        "pattern": r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+(/|~|\$HOME|\*)",
-        "why": "递归强删根目录/家目录/通配。",
+        # 3.5.10 修复（#48）：补结尾锚定 + 认短选项分离 + 认大写 R。
+        # 修前：`rm -rf /tmp/v350` 误拦（前缀贪婪），`rm -r -f /` 与 `rm -Rf /` 漏拦。
+        "pattern": r"\brm\s+" + _RM_OPTS + r"(/|~|\$HOME|\*)" + _RM_ROOT_TAIL,
+        "why": "递归强删根目录/家目录/通配。\n"
+               "  只匹配【目标恰好是根】的情况 ——\n"
+               "  `rm -rf /tmp/build` 这类正常清理不会被拦。",
         "instead": "写出完整、具体的路径，并先 `ls` 确认目标。",
     },
     {
@@ -50,7 +116,9 @@ CMD_DENY = [
         # 全部【放行】—— 在 Windows 上等于没有保护。
         # 被 /d/... 拦住是巧合（它以 / 开头），不是设计了 Windows 支持。
         "id": "rm_rf_windows_drive",
-        "pattern": r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+"
+        # 3.5.10 修复（#48）：与 rm_rf_traversal 共用选项解析片段。
+        # 修前同样漏 `rm -r -f D:/` 与 `rm -Rf D:/`。
+        "pattern": r"\brm\s+" + _RM_OPTS +
                    r"([A-Za-z]:[\\/]?(\s|$|\*)|"
                    r"[A-Za-z]:[\\/][^\\/\s]+[\\/]?\s*$|"
                    r"[A-Za-z]:[\\/](Users|Windows|Program))",
@@ -64,7 +132,9 @@ CMD_DENY = [
     },
     {
         "id": "rm_rf_windows_env",
-        "pattern": r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+"
+        # 3.5.10 修复（#48）：与 rm_rf_traversal 共用选项解析片段。
+        # 修前同样漏 `rm -r -f $env:TEMP/x` 与 `rm -Rf $TEMP`。
+        "pattern": r"\brm\s+" + _RM_OPTS +
                    r"(\$env:(TEMP|TMP|USERPROFILE)|\$TEMP|\$TMP|\$USERPROFILE|\$HOME)"
                    r"([\\/](\s|$|\*))?",
         "why": "递归强删 Windows 环境变量指向的目录（临时目录/用户目录）。\n"
@@ -92,7 +162,12 @@ CMD_DENY = [
 CONTENT_DENY = [
     {
         "id": "rm_rf_in_content",
-        "pattern": r"^[ \t]*\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+(/|~|\$HOME)(\s|$|--no-preserve-root)",
+        # 3.5.10 修复（#48）：与 CMD_DENY 的三条 rm 规则共用同一个选项解析
+        # 片段 _RM_OPTS，而不是各写各的。
+        # 修前同样漏 `rm -r -f /` 与 `rm -Rf /`（实测坐实）——
+        # 与 rm_rf_traversal 是同一个缺陷形状，只是住在另一套规则里。
+        "pattern": (r"^[ \t]*\brm\s+" + _RM_OPTS +
+                    r"(/|~|\$HOME)(\s|$|--no-preserve-root)"),
         "line_anchored": True,
         "why": "写入的内容里，有一【整行】是递归强删根目录——这段内容一旦被当成脚本执行就会出事。",
         "instead": "如果这是在写文档/注释，把该模式放在句子中间或加转义（如「禁止 rm -rf / 这类命令」），避免独占一行。",
@@ -182,12 +257,38 @@ def main():
                           "policy.destructive_gate.warn_patterns"
                           if dgate.get("warn_patterns") else "内置 WARN")
 
-    # 按工具决定用哪套规则 —— 这是本次修复的核心
+    # 按工具决定用哪套规则。
+    #
+    # ⚠️ 不变量（3.5.10 / #48 确立）：**每条规则只作用于语义对应的字段**。
+    #     完整矩阵见模块头 CMD_DENY / CONTENT_DENY 的定义处。
+    #
+    #     content 字段 = 写入的内容，不是正在执行的命令 ——
+    #     写文件时提到 `pkill`/`rm` 是「写入内容」，不是「执行命令」。
+    #     所以 MCP 写文件的 content 只过 content_rules，不过 cmd_rules。
+    #
+    #     ⚠️ 3.5.10 之前这里只扫 repr(ti)，带来两个叠加问题：
+    #        ① repr 给每个值加一层引号，末尾变成 "'}"。带结尾锚定的规则
+    #           （rm_rf_traversal / rm_rf_in_content / rm_rf_windows_env）
+    #           在 MCP 通道【永远匹配不到】。MCP 的 rm 保护实际是靠
+    #           rm_rf_traversal 的【前缀贪婪缺陷】侥幸生效的。
+    #        ② cmd_rules + content_rules 混用 → 跨字段泄漏：
+    #           MCP 写文件的 content 字段被 cmd 类规则拦（实测坐实）。
+    #     现在改为逐字段 + 按字段语义分派规则。
     if tool == "Bash":
         targets = [("command", ti.get("command") or "", cmd_rules)]
     elif tool.startswith("mcp__"):
-        # MCP 工具的输入【可能】被执行（写文件、执行命令），按命令上下文从严
-        targets = [("input", repr(ti), cmd_rules + content_rules)]
+        # 逐字段取真实值，而不是 repr(整体) —— 让锚定在 MCP 通道同样成立。
+        # 但【不】把两套规则混用：命令类字段 → cmd_rules，
+        # 内容类字段 → content_rules。
+        items = []
+        for k, v in ti.items():
+            field = "input." + str(k)
+            name = str(k).lower()
+            if "content" in name or "text" in name or "body" in name:
+                items.append((field, str(v), content_rules))
+            else:
+                items.append((field, str(v), cmd_rules))
+        targets = items
     elif tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
         # 只对内容做损害性检查；路径单独只看是否指向敏感位置
         items = []
@@ -237,7 +338,9 @@ def main():
                 "  误判？不要重试同一条命令，也不要绕开。\n"
                 "  改用等价但精确的写法，或直接告诉用户「我要做 X，被 G5 拦了，因为 Y」。"
                 % (rule["id"], tool, field, rule["pattern"], m.group(0)[:120],
-                   rule["why"], rule["instead"])
+                   rule["why"], rule["instead"]),
+                gate_id="G5", rule_id=rule["id"], tool=tool,
+                session_id=data.get("session_id"),
             )
 
     allow()

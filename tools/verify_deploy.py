@@ -52,6 +52,7 @@ from pathlib import Path
 # install.py 的 _collect 与本文件的 scan_dir 都从它取，避免再次出现两边不一致。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from deploy_files import is_tracked  # noqa: E402
+import src_identity as sid  # noqa: E402
 
 # --- 控制台编码（可移植性）---
 # Windows 控制台默认 GBK(cp936)；print 中文时遇到非 GBK 字符会抛
@@ -138,6 +139,70 @@ def _read_version(root):
         return v or None
     except Exception:
         return None
+
+
+def _load_manifest(path):
+    """读部署清单。返回 (dict|None, 错误说明)
+
+    没有清单不算错误 —— 它的意思是「还没装过」，交给 MISSING 逻辑处理。
+    """
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), None
+    except Exception as e:
+        return None, "清单无法解析：%r" % (e,)
+
+
+def _check_manifest_integrity(man):
+    """L1：清单自身是否完好（manifestDigest 自洽）。
+
+    清单是 DEPLOYED_INTEGRITY 的判据来源 —— 它自己坏了，
+    下游结论就不可信。所以这一层必须排在最前，且独立报错。
+    """
+    if not isinstance(man, dict):
+        return False, "清单不是对象"
+    claimed = man.get("manifestDigest")
+    if claimed is None:
+        # 旧清单没有该字段 —— 不判为「坏」（那是 legacy 形态，由 L4 处理）
+        return True, "（旧清单无 manifestDigest）"
+    d = dict(man)
+    d.pop("manifestDigest", None)
+    if sha256_obj(d) != claimed:
+        return False, "manifestDigest 不符 —— 清单自身被改动过"
+    return True, "manifestDigest 校验通过"
+
+
+def _check_deployed_integrity(installed, man):
+    """L2：已装副本是否仍匹配清单记录的 hash。
+
+    与 compare_files 的区别：后者比的是「源码 vs 已装」，
+    这里比的是「清单 vs 已装」—— 即「有没有人动过部署」。
+    这两件事必须分开：源码合法前进不该被判成部署被改。
+    """
+    bad = []
+    for it in (man.get("items") or []):
+        rel = it.get("path")
+        if not rel:
+            continue
+        p = os.path.join(installed, rel)
+        if not os.path.isfile(p):
+            bad.append("%s（缺失）" % rel)
+        elif sha256_file(p) != it.get("sha256"):
+            bad.append("%s（被改动）" % rel)
+    return bad
+
+
+def _is_higher(a, b):
+    """a 的版本号是否高于 b。任一不可解析 → False。"""
+    if not a or not b:
+        return False
+    try:
+        return tuple(int(x) for x in a.split(".")) > \
+               tuple(int(x) for x in b.split("."))
+    except Exception:
+        return False
 
 
 def compare_files(src, dst):
@@ -332,6 +397,9 @@ def main():
     ap.add_argument("--require-complete", action="store_true",
                     help="要求文件齐全（MISSING 致命）。"
                          "复制【之后】的最终校验用它；复制【之前】的预检不要用。")
+    ap.add_argument("--pkg", default=None,
+                    help="元数据层目录（含 SOURCE_IDENTITY.json）。"
+                         "默认取 source 的上一层。")
     a = ap.parse_args()
 
     src = scan_dir(a.source)
@@ -372,26 +440,136 @@ def main():
     #    残缺部署（7 个只装 2 个）会打出 `判定: MATCH`
     #    而上面还列着 5 行 `MISSING` —— 自我矛盾。
     #    改用 --require-complete 区分两次调用的语义。
-    # ⚠️ STALE 只在【同版本】时才等于漂移。
     #
-    #    实测缺陷（本轮暴露）：装一个改了 hook 文件的新版本时，部署侧是旧版本，
-    #    内容必然不一致 → STALE → 预检中止 → 每次升级都要人工加 --force。
-    #    这与"升级不该需要 --force"直接矛盾。
+    # ⚠️⚠️ 判定分层（3.5.10 / #49）—— 这里有【两层完全不同的东西】，
+    #      原先被「版本号是否相同」一个判据混在一起，导致未发布版本的
+    #      合法修订被误判成篡改（本轮实测坐实）。
     #
-    #    根因还是 Gate 1：没有版本身份，就分不清两种情况 ——
-    #      · 部署被人改过（真漂移，必须拦）
-    #      · 我们发布了新版本（正常升级，不该拦）
-    #    VERSION 正好补上这个身份：
-    #      部署版本 == 源版本 → 内容还不一致 = 真漂移 → 拦
-    #      部署版本 != 源版本 → 这是一次升级 → 不拦（覆盖正是本次操作的意图）
-    #    没有 VERSION 的老部署（读到 None）同样按"版本不同"处理，即允许升级。
+    #      现在按固定顺序分四层，前三层任何一层失败都【不得】被
+    #      「把 VERSION 调高」绕过：
+    #
+    #        L1 MANIFEST_INTEGRITY     —— 清单自身是否被改动
+    #        L2 DEPLOYED_INTEGRITY     —— 已装副本是否仍匹配清单
+    #        L3 CURRENT_SOURCE_IDENTITY —— 源码是否自证为一个一致快照
+    #        L4 VERSION / SNAPSHOT RELATION —— 版本与快照的关系
+    #
+    #      前两层合起来就是原来的「部署侧」；L3 是新增的「源侧」身份。
     same_version = (_read_version(a.source) == _read_version(a.installed))
 
-    real_drift = ([p for p in file_problems if p.startswith("STALE")]
-                  if same_version else [])
+    # ---- L1 MANIFEST_INTEGRITY ----
+    # 清单是 L2 的判据来源 —— 它自己坏了，L2 的结论就不可信。
+    manifest_path = os.path.join(os.path.dirname(os.path.abspath(a.installed)),
+                                 "DEPLOY_MANIFEST.json")
+    old_manifest, man_err = _load_manifest(manifest_path)
+
+    manifest_ok = True
+    manifest_why = ""
+    if old_manifest is None:
+        # ⚠️ 三种情况都到这里，必须分清（实测踩到）：
+        #   · 文件不存在         → 还没装过，不是"清单坏了"
+        #   · 文件存在但解析失败 → 这才是清单坏了
+        #   原先只判 man_err，导致"文件不存在"也走 _check_manifest_integrity(None)
+        #   → 返回 False → 误报 MANIFEST_INTEGRITY_FAILURE。
+        #   实测后果：upgrade_path_test 18→13，升级被自己的假报警拦下。
+        if man_err:
+            manifest_ok = False
+            manifest_why = man_err
+        else:
+            manifest_ok = True
+            manifest_why = "（无部署清单 —— 尚未安装过）"
+    else:
+        manifest_ok, manifest_why = _check_manifest_integrity(old_manifest)
+
+    # ---- L3 CURRENT_SOURCE_IDENTITY ----
+    pkg_dir = sid.default_pkg_dir(a.source) if not a.pkg else a.pkg
+    sidr = sid.check(pkg_dir, a.source)
+
+    # ---- L4 VERSION / SNAPSHOT RELATION ----
+    legacy = (old_manifest or {}).get("sourceSnapshot") is None
+
+    real_drift = []
     if a.require_complete:
         real_drift += [p for p in file_problems if p.startswith("MISSING")]
-    ok = not real_drift and not eff_problems
+
+    status = "MATCH"
+    notes = []
+
+    # ⚠️ 全新安装不是漂移（项目 #18 的既有语义，实测踩到过两次）：
+    #    目标目录里还没有我们的 VERSION → 这就是「没装过」。
+    #    把它判成 UNPROVEN 会让每次装到新项目都被挡住，
+    #    而"把文件装上去"恰恰是这次要做的动作。
+    fresh_install = (_read_version(a.installed) is None)
+
+    if not manifest_ok:
+        # 清单自身坏了 → 先停下。这不是 source identity 的问题。
+        status = "MANIFEST_INTEGRITY_FAILURE"
+    elif fresh_install:
+        status = "FRESH_INSTALL"
+    else:
+        # L2：已装副本 vs 清单
+        #
+        # ⚠️ --write-manifest 模式（安装【之后】的最终校验）必须跳过这一层。
+        #    实测踩到：安装把文件复制完后，installed 已经是新内容，
+        #    而 old_manifest 还是【安装之前】写的清单 →
+        #    L2 必然对不上 → 判 DEPLOYMENT_DRIFT → 把错误的 status 写进新清单。
+        #    这正是本次要刷新的对象：菜单在换菜的时候，不能拿旧菜单对账。
+        #
+        #    篡改检测没有因此丢失：真被改动过的部署会在【复制之前】的
+        #    预检（不带 --write-manifest）里被 L2 拦下。
+        stale = [p for p in file_problems if p.startswith("STALE")]
+        if old_manifest is not None and not a.write_manifest:
+            deployed_bad = _check_deployed_integrity(a.installed, old_manifest)
+        else:
+            deployed_bad = []
+        if deployed_bad:
+            status = "DEPLOYMENT_DRIFT"
+        else:
+            # L3：源身份 —— 前三层任何一层失败都不得被「升 VERSION」绕过，
+            #     所以即使是 legacy 迁移，也必须先过这一层。
+            if not sidr["ok"]:
+                status = "SOURCE_IDENTITY_UNPROVEN"
+            elif legacy:
+                # legacy 迁移五项条件：无 sourceSnapshot + L1 过 + L2 过
+                #                       + L3 过 + 版本一致
+                if not same_version:
+                    status = "SOURCE_IDENTITY_UNPROVEN"
+                    notes.append("legacy 迁移要求版本一致，实际 %s ≠ %s"
+                                 % (_read_version(a.installed),
+                                    _read_version(a.source)))
+                else:
+                    status = "LEGACY_BASELINE_MIGRATION"
+            else:
+                # L4 VERSION / SNAPSHOT RELATION（仅在前三层全过后才看）
+                dep_snap = (old_manifest or {}).get("sourceSnapshot")
+                cur = sidr["snapshot"]
+                if cur == dep_snap:
+                    status = "MATCH"
+                elif _is_higher(_read_version(a.source),
+                                _read_version(a.installed)):
+                    status = "NORMAL_UPGRADE"
+                elif _read_version(a.source) == _read_version(a.installed):
+                    status = "SOURCE_ADVANCED"
+                else:
+                    status = "SOURCE_IDENTITY_DRIFT"
+
+    # 剩余差异并入最终判定（不允许"下面列着问题、上面判 MATCH"）。
+    if a.require_complete and any(p.startswith("MISSING")
+                                  for p in file_problems):
+        if status in ("MATCH", "FRESH_INSTALL"):
+            status = "SOURCE_IDENTITY_DRIFT"
+
+    # ⚠️ eff_problems（生效策略问题）必须并入 status，不能只让 ok 变红。
+    #    实测踩到：隔离环境里 load_policy 失败时，
+    #      ok=False 但 status 仍打印 MATCH —— 上面列着问题、下面判 MATCH，
+    #      正是本项目自己批评过的自相矛盾形状。
+    #    判据："status 说没事" 与 "ok 说有事" 不允许同时成立。
+    if eff_problems and status == "MATCH":
+        status = "EFFECTIVE_POLICY_PROBLEM"
+
+    BLOCKING = {"MANIFEST_INTEGRITY_FAILURE", "DEPLOYMENT_DRIFT",
+                "SOURCE_IDENTITY_UNPROVEN", "SOURCE_IDENTITY_DRIFT",
+                "EFFECTIVE_POLICY_PROBLEM"}
+    ok = status not in BLOCKING
 
     if a.write_manifest:
         manifest = {
@@ -412,6 +590,18 @@ def main():
             "items": [{"path": k, "sha256": v["sha256"], "bytes": v["bytes"]}
                       for k, v in sorted(dst.items())],
             "effectivePolicyDigest": sha256_obj(policy) if policy else None,
+            # ── Gate 1 · Source Identity（3.5.10 / #49）──
+            # 「这次安装的源快照是谁」。写入后，下一次校验就能区分
+            #   · 源码合法前进（快照变了但身份自证）→ SOURCE_ADVANCED
+            #   · 部署被人动过（清单 items 对不上）  → DEPLOYMENT_DRIFT
+            # 这两个概念原先被「版本号是否相同」混在一起判。
+            #
+            # ⚠️ 只有源身份【自证通过】时才写这个键。
+            #    源身份缺失/不 OK 时写 null 是错的 —— 那会把
+            #    「这次没检查源身份」伪装成「legacy 老部署」，
+            #    而 legacy 的语义是「引入该机制之前就已装好的部署」。
+            #    不写键 = 保持「无声明」这个诚实状态，下次仍判 UNPROVEN。
+            **({"sourceSnapshot": sidr["snapshot"]} if sidr["ok"] else {}),
         }
         manifest["manifestDigest"] = sha256_obj(manifest, ("manifestDigest",))
         mp = os.path.join(a.installed, "..", "DEPLOY_MANIFEST.json")
@@ -421,8 +611,12 @@ def main():
             json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
         os.replace(tmp, mp)
 
+    BLOCKING = {"MANIFEST_INTEGRITY_FAILURE", "DEPLOYMENT_DRIFT",
+                "SOURCE_IDENTITY_UNPROVEN", "SOURCE_IDENTITY_DRIFT"}
+
     result = {
-        "status": "MATCH" if ok else "SOURCE_IDENTITY_DRIFT",
+        "status": status,
+        "blocking": status in BLOCKING,
         "packageVersion": _read_version(a.installed),
         "sourceDir": os.path.abspath(a.source),
         "installedDir": os.path.abspath(a.installed),
@@ -432,13 +626,28 @@ def main():
         "effectiveProblems": eff_problems,
         "effectiveBudgetKeys": sorted(
             k for k in (policy or {}).get("budget", {}) if not k.startswith("_")),
+        # ── 分层判定明细（3.5.10 / #49）──
+        # 四层各自的结果必须分开报，否则读的人分不清
+        # 「部署被改」和「源码合法前进」—— 这正是本轮要修的误判。
+        "layers": {
+            "manifestIntegrity": {"ok": manifest_ok, "detail": manifest_why},
+            "deployedIntegrity": {
+                "ok": not (old_manifest is not None
+                           and _check_deployed_integrity(a.installed, old_manifest)),
+                "detail": "（无清单，跳过）" if old_manifest is None else "清单比对",
+            },
+            "currentSourceIdentity": {
+                "ok": sidr["ok"], "detail": sidr["reason"],
+                "declared": sidr["declared"], "actual": sidr["snapshot"],
+            },
+            "legacyManifest": legacy,
+        },
         # Claim 边界：机器能力、Threat Model、允许的 Claim 必须对齐。
         # 放进 JSON 是为了让消费这个输出的人/程序也能看到边界，而不是只看到 MATCH。
-        "claimBoundary": ("T1 本地一致性 only：只证明已安装文件与源逐字节一致；"
-                          "不证明门的行为正确，也不证明源本身正确。见包内 install.md 的「已知边界」。"),
-        # 版本不同时 STALE 被豁免，MATCH 的含义变成"没有【无法解释的】漂移"。
-        # 不把这件事显式说出来，输出就会变成"边列 STALE 边判 MATCH"的自相矛盾形状。
-        "versionChanged": (not same_version),
+        "claimBoundary": ("T1 本地一致性 only：source identity 只证明源码目录内部自洽"
+                          "且与声明一致；不证明源码正确、可部署、经过测试；"
+                          "不防有写权限者同时改源与声明（T2 NOT_PROTECTED）。"
+                          "见包内 install.md 的「已知边界」。"),
     }
 
     if a.json:
@@ -465,22 +674,42 @@ def main():
                 print("  " + p)
             print()
         print("=" * 70)
+        print("分层判定（3.5.10 / #49 —— 两层概念必须分开报）：")
+        L = result["layers"]
+        print("  L1 MANIFEST_INTEGRITY      : %s  %s"
+              % ("PASS" if L["manifestIntegrity"]["ok"] else "FAIL",
+                 L["manifestIntegrity"]["detail"]))
+        print("  L2 DEPLOYED_INTEGRITY      : %s  %s"
+              % ("PASS" if L["deployedIntegrity"]["ok"] else "FAIL",
+                 L["deployedIntegrity"]["detail"]))
+        print("  L3 CURRENT_SOURCE_IDENTITY : %s  %s"
+              % ("PASS" if L["currentSourceIdentity"]["ok"] else "FAIL",
+                 L["currentSourceIdentity"]["detail"]))
+        print("  L4 版本/快照关系            : %s"
+              % ("legacy 清单（无 sourceSnapshot）"
+                 if L["legacyManifest"] else "新清单（含 sourceSnapshot）"))
+        print()
         print("判定: %s" % result["status"])
-        if result["versionChanged"]:
-            # ⚠️ 不说这一句，输出就退化成"边列 STALE 边判 MATCH"——
-            #    正是本包自己批评过的自相矛盾形状。判定必须说清它的含义。
-            print("      说明：源与已安装的 VERSION 不同（源 %s / 已安装 %s）——"
-                  % (_read_version(a.source), _read_version(a.installed)))
-            print("            内容差异按【版本变更】处理，不计为漂移（这是升级的正常形态）；")
-            print("            此处的 MATCH 意为「没有无法解释的漂移」，不是「内容完全相同」。")
+        if result["status"] == "SOURCE_ADVANCED":
+            print("      说明：同一个未发布版本号下，源码合法前进了一步。")
+            print("            部署侧完好、源身份自证通过 —— 允许升级。")
+        if result["status"] == "LEGACY_BASELINE_MIGRATION":
+            print("      说明：这是首次引入 source identity 之前的存量部署。")
+            print("            L1/L2/L3 全过 + 版本一致 → 允许【一次】迁移。")
+            print("            迁移后清单会写入 sourceSnapshot，此后再不走 legacy。")
         # Claim 边界：结论必须限定在证据能支撑的范围内。
         # 没有这三行的后果是实测过的：MATCH 会被读成"门装好了、能拦了"。
-        print("      边界：本判定只覆盖【已安装文件与源逐字节一致】（T1 本地一致性）。")
+        print("      边界：本判定只覆盖【T1 本地一致性】——")
+        print("            已装文件与清单一致 + 源码目录内部自洽。")
         print("            它不证明门的行为正确，也不证明源本身是对的。")
         print("            详见包内 install.md 的「已知边界」。")
         if not ok:
             print()
-            print("SOURCE_IDENTITY_DRIFT —— 声明的修订 ≠ 实际运行的产物。")
+            print("%s —— 声明的修订 ≠ 实际运行的产物。" % result["status"])
+            if result["status"] in ("SOURCE_IDENTITY_UNPROVEN",):
+                print("源身份无法证明。若这是你刚改完 hooks 的预期结果，显式刷新：")
+                print("    python tools/source_identity.py --write")
+                print("（install / verify / CI 都不会自动刷新 —— 那是设计意图）")
             print("Checkpoint 是派生结果：不要在此基础上继续，先修正部署。")
         print("=" * 70)
 

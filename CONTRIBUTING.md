@@ -17,16 +17,32 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **167 项**）：
+提交前必须全部通过（共 **236 项**）：
 
 ```bash
-python tests/four_gate_selftest.py    # 53/53
-python tests/cmd_chain_test.py        # 21/21
-python tests/adversarial_test.py      # 24/24
-python tests/budget_safety_test.py    # 30/30
-python tests/intent_gate_test.py      # 21/21
-python tests/upgrade_path_test.py     # 18/18
+python tests/four_gate_selftest.py        # 53/53
+python tests/cmd_chain_test.py            # 21/21
+python tests/adversarial_test.py          # 24/24
+python tests/budget_safety_test.py        # 30/30
+python tests/intent_gate_test.py          # 21/21
+python tests/upgrade_path_test.py         # 19/19
+python tests/g5_real_regression_test.py   # 25/25  ← 真实会话用例
+python tests/source_identity_consistency_test.py  # 13/13
+python tests/gate_events_test.py          # 30/30
 ```
+
+### 改了 hooks 之后
+
+本项目有**源身份**纪律（详见 `tools/source_identity.py`）：
+
+```text
+改了 hooks/ 下任何文件（含 VERSION）
+  → 必须显式刷新源身份，否则 CI 的只读校验会红：
+      python tools/source_identity.py --write
+```
+
+⚠️ `install.py` / `verify_deploy.py` / CI **都不会自动刷新** —— 这是设计意图：
+若安装过程能自动刷新，一份 dirty source 跑一次安装就把自己「合法化」了。
 
 ## 提交变更
 
@@ -106,7 +122,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 167 项测试全部通过
+[ ] 236 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 已在 CHANGELOG.md 添加条目

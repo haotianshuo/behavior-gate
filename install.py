@@ -63,6 +63,10 @@ except Exception:
 
 
 SRC_HOOKS = os.path.join(HERE, "adapters", "claude-code", "hooks")
+# 元数据层目录（含 SOURCE_IDENTITY.json）。
+# ⚠️ 它【不】随 hooks 复制到部署位置 —— 它是源侧身份，
+#    复制过去会让部署副本自称"我是某份源码"，语义就错了。
+PKG_DIR = os.path.join(HERE, "adapters", "claude-code")
 SRC_FRAG = os.path.join(HERE, "adapters", "claude-code", "settings.fragment.json")
 SRC_POLICY = os.path.join(HERE, "policy", "behavior-policy.json")
 
@@ -460,20 +464,27 @@ def main():
     if os.path.isfile(verify) and _already:
         r0 = subprocess.run([sys.executable, verify,
                              "--source", SRC_HOOKS,
-                             "--installed", hooks_dst],
+                             "--installed", hooks_dst,
+                             "--pkg", PKG_DIR],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if r0.returncode != 0:
             echo("")
-            echo("[!] 升级前检测到部署漂移（SOURCE_IDENTITY_DRIFT）—— 已中止。")
+            echo("[!] 升级前检测到不一致 —— 已中止。")
             for line in r0.stdout.decode("utf-8", "replace").splitlines():
-                if any(k in line for k in ("STALE", "FAKE", "MISSING", "EXTRA")):
+                if any(k in line for k in ("STALE", "FAKE", "MISSING", "EXTRA",
+                                           "判定:", "L1 ", "L2 ", "L3 ")):
                     echo("      " + line.strip())
             echo("")
-            echo("    这通常意味着：有人直接改了 .claude/hooks/，或源码与部署不同步。")
+            echo("    三种可能，先分清是哪一种：")
+            echo("      · DEPLOYMENT_DRIFT        —— 有人直接改了 .claude/hooks/")
+            echo("      · SOURCE_IDENTITY_UNPROVEN —— 源码改了但源身份声明未刷新")
+            echo("      · MANIFEST_INTEGRITY_FAILURE —— 部署清单自身被改动")
             echo("    先看完整原因：")
             echo("      python tools/verify_deploy.py --source \"%s\" --installed \"%s\""
                  % (SRC_HOOKS, hooks_dst))
-            echo("    如果确认要以源码为准覆盖，加 --force。")
+            echo("    如果是【你刚改完 hooks】：显式刷新源身份（不会被自动刷新，这是设计意图）")
+            echo("      python tools/source_identity.py --write")
+            echo("    如果确认要以源码为准覆盖部署，加 --force。")
             if not FORCE:
                 return 2
 
@@ -535,6 +546,7 @@ def main():
         r = subprocess.run([sys.executable, verify,
                             "--source", SRC_HOOKS,
                             "--installed", hooks_dst,
+                            "--pkg", PKG_DIR,
                             "--write-manifest",
                             "--require-complete"],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -542,6 +554,9 @@ def main():
         # 只回显判定行，细节留给用户按需查看
         for line in out.splitlines():
             if any(k in line for k in ("判定:", "SOURCE_IDENTITY_DRIFT",
+                                       "SOURCE_IDENTITY_UNPROVEN",
+                                       "MANIFEST_INTEGRITY_FAILURE",
+                                       "DEPLOYMENT_DRIFT",
                                        "STALE", "FAKE", "MISSING", "EXTRA",
                                        "生效策略 budget")):
                 echo("      " + line.strip())
@@ -552,7 +567,12 @@ def main():
             echo("      python tools/verify_deploy.py --source \"%s\" --installed \"%s\""
                  % (SRC_HOOKS, hooks_dst))
             return 2
-        echo("      MATCH —— 源码与已安装一致，且生效策略里无已删除的键")
+        # ⚠️ 这里不能说死成 "MATCH" —— 部署校验的判定已经分层（#49），
+        #    同一个 returncode=0 可能是 MATCH / NORMAL_UPGRADE / SOURCE_ADVANCED /
+        #    LEGACY_BASELINE_MIGRATION。写死一句话会造出自相矛盾的输出形状
+        #    （上面写 SOURCE_ADVANCED、下面写 MATCH），
+        #    而本项目正好一直在治这个病。
+        echo("      部署校验通过 —— 源码与已安装一致，且生效策略里无已删除的键")
         # Claim 边界：用户看的是【这里】的输出，
         # 不是 verify_deploy 的。边界不写在这里等于没写。
         echo("      ⚠️ 边界：这只证明【文件一致】，不证明门的行为正确。")

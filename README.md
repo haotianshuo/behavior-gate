@@ -129,16 +129,57 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **167 项**全过）：
+跑测试（预期 **236 项**全过）：
 
 ```bash
-python tests/four_gate_selftest.py    # 53/53
-python tests/cmd_chain_test.py        # 21/21
-python tests/adversarial_test.py      # 24/24
-python tests/budget_safety_test.py    # 30/30
-python tests/intent_gate_test.py      # 21/21
-python tests/upgrade_path_test.py     # 18/18
+python tests/four_gate_selftest.py        # 53/53
+python tests/cmd_chain_test.py            # 21/21
+python tests/adversarial_test.py          # 24/24
+python tests/budget_safety_test.py        # 30/30
+python tests/intent_gate_test.py          # 21/21
+python tests/upgrade_path_test.py         # 19/19
+python tests/g5_real_regression_test.py   # 25/25  ← 真实会话挖出的用例
+python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
+python tests/gate_events_test.py          # 30/30  ← Gate 事件记录
 ```
+
+> **synthetic 与 REAL 分开** —— `tests/` 里前六套是按规则构造的用例（写法理想）；
+> `g5_real_regression_test.py` 里的用例来自**真实会话**并已复现。
+> #48 之所以漏了这么久，正是因为理想写法（`rm -rf /`）与真实写法
+> （`rm -rf /tmp/x`、`rm -r -f /`、`rm -Rf /`）不同。
+
+---
+
+## 门做了什么（观测）
+
+每次门**出手**（deny / stop-feedback），会往状态目录追加一行事件：
+
+```
+<state_dir>/gate-events.jsonl
+```
+
+一行一个事件，形如：
+
+```json
+{"ts":"2026-09-15T19:40:00+0800","session":"...","gate_id":"G5",
+ "rule_id":"rm_rf_traversal","decision":"deny","tool":"Bash",
+ "source_class":"NATURAL","version":"3.5.10","source_snapshot":"..."}
+```
+
+**只记「门出手了」，不记放行。** 有了它，就能回答
+「这周哪道门拦了多少次、哪条规则、哪份源码快照」——
+而不必再反向翻几万条聊天记录。
+
+**它不记什么**（有意为之）：完整 prompt、assistant 输出、
+完整命令、Write/Edit 正文、MCP payload、任何密钥。
+
+> ⚠️ **边界**：这是 **T1 本地观测证据**。
+> 它证明「本机门代码记录了自己做出的决定」；
+> **不**证明日志不可修改、不可伪造、不可删除，**也不构成不可抵赖的证据**。
+> 有写权限的人可以改它。它不是安全审计系统 —— 需要那种能力请用操作系统级沙箱。
+
+**记录失败绝不改变门的判定**：写不进日志时，门照常执行原来的 deny / allow。
+观测层永远不会成为门的故障点。
 
 ---
 
@@ -210,14 +251,16 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（47 项真实问题）
+├─ CHANGELOG.md                    变更记录（50 项真实问题）
+├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
+│   ├─ SOURCE_IDENTITY.json        源快照身份声明（元数据层，不进 hooks/）
 │   ├─ settings.fragment.json      hook 配置片段
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
-├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          六套测试（167 项）
+├─ tools/                          部署校验 / 源身份 / 可移植性校验
+└─ tests/                          九套测试（236 项，含真实回归）
 ```
 
 ---

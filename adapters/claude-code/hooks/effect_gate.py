@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (  # noqa: E402
     read_input, deny_stop, allow, load_policy, warn_inactive,
+    record_gate_event,
 )
 
 
@@ -233,8 +234,12 @@ def main():
     # 不合规时的统一出口（#43）。
     # 三处 deny_stop 都改走这里 —— 「拦一次」的语义只有一处实现，
     # 避免"改了两处漏了第三处"（本项目 #19 的老毛病）。
-    def _reject(reason):
-        """首次阻断；重试轮次放行，但【放行必须可见】。"""
+    def _reject(reason, rule_id="unspecified"):
+        """首次阻断；重试轮次放行，但【放行必须可见】。
+
+        rule_id 供 gate-events 记录用 —— 它区分「哪条 G3 判据拦的」，
+        而 reason 文本不适合做统计键（会变）。
+        """
         if retry:
             sys.stderr.write(
                 "【G3 生效门】本轮为重试轮次 → 已放行（不再次阻断）。\n"
@@ -243,8 +248,13 @@ def main():
                 "  %s\n"
                 % reason.splitlines()[0])
             sys.stderr.flush()
+            # 重试轮次的「可见放行」也算一次真实干预 —— 记下来，
+            # 否则统计里会看不到「G3 打回了但没拦住」这一类的真实发生率。
+            record_gate_event("G3", rule_id, "stop_feedback_retry",
+                              tool="Stop", session_id=data.get("session_id"))
             allow()
-        deny_stop(reason)
+        deny_stop(reason, gate_id="G3", rule_id=rule_id, tool="Stop",
+                  session_id=data.get("session_id"))
 
     claim, level, level_num, risk = analyze(asserted)
     if not claim:
@@ -311,6 +321,8 @@ def main():
             "  注意：「已改完 / 已修改 / 已落地」是允许的（动作完成），\n"
             "       「已修复 / 已完成 / 已部署」不允许（目标达成）。"
             % (goal.group(0), goal.group(0))
+,
+            "contradictory_evidence"
         )
 
     # 未声明风险级别 → 按【中】从严（缺省不该等于豁免）
@@ -351,6 +363,8 @@ def main():
             "  如果确实做不到，就把措辞改成「未验证 / NOT_MEASURED」——\n"
             "  诚实地说没验证，比不验证就说完成，代价小得多。"
             % claim.group(1)
+,
+            "missing_effect_evidence"
         )
 
     # 有证据块，但证据级别不够
@@ -378,6 +392,9 @@ def main():
         % (claim.group(1), effective_risk,
            "声明" if risk else "未声明，按中风险从严",
            shown, need, need)
+,
+        gate_id="G3", rule_id="insufficient_evidence_level",
+        tool="Stop", session_id=data.get("session_id"),
     )
 
 
