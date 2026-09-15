@@ -1,12 +1,13 @@
 # 行为门安装说明
 
-> 对应版本：**V3.5.10** ｜ 2026-09-14
+> 对应版本：**V3.5.10** ｜ 2026-09-15
 >
 > ⚠️ **它证明不了什么，和它能拦什么同样重要 —— 见下面的「已知边界」。**
 > 一句话：门管的是「行动方式」和「格式」，不是「判断对不对」。
 > `判定: MATCH` / `自检通过` / `证据：L3` 都**不等于**内容已被核实。
 > 当前实测：四关 53/53、安装链路 21/21、对抗 24/24、预算安全 30/30、
-> 　　　　　意图门 21/21、升级路径 18/18（=167 项）+ 1:1 复刻 13/13
+> 　　　　　意图门 21/21、升级路径 19/19、G5 真实回归 25/25、
+> 　　　　　源身份一致性 13/13、Gate 事件 30/30（=236 项）
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -52,15 +53,18 @@ python install.py --scope global --apply   # 安装
 ## 安装后验证
 
 ```bash
-python tests/four_gate_selftest.py    # 期望 53/53
-python tests/cmd_chain_test.py        # 期望 21/21
-python tests/adversarial_test.py      # 期望 24/24
-python tests/budget_safety_test.py    # 期望 30/30
-python tests/intent_gate_test.py      # 期望 21/21
-python tests/upgrade_path_test.py     # 期望 18/18
+python tests/four_gate_selftest.py        # 期望 53/53
+python tests/cmd_chain_test.py            # 期望 21/21
+python tests/adversarial_test.py          # 期望 24/24
+python tests/budget_safety_test.py        # 期望 30/30
+python tests/intent_gate_test.py          # 期望 21/21
+python tests/upgrade_path_test.py         # 期望 19/19
+python tests/g5_real_regression_test.py   # 期望 25/25  ← 真实会话用例
+python tests/source_identity_consistency_test.py  # 期望 13/13
+python tests/gate_events_test.py          # 期望 30/30
 ```
 
-**合计 167 项。** 也可以一次跑完：
+**合计 236 项。** 也可以一次跑完：
 
 ```bash
 python tools/verify_portable.py       # 可移植性校验
@@ -172,7 +176,7 @@ malicious-writer-proof、不可抵赖、密码学不可篡改 ——
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          六套测试（=167 项）
+└─ tests/                          九套测试（=236 项）
 ```
 
 ### 五道门
@@ -184,6 +188,7 @@ malicious-writer-proof、不可抵赖、密码学不可篡改 ——
 | **G3 生效** | `Stop` | ✅ `{"decision":"block"}` |
 | G4 循环 | 提示词层 + 收口记录 | ⚠️ 不强制 |
 | **G5 危险** | `PreToolUse(Bash/Edit/Write/MCP)` | ✅ exit 2 |
+| **G7 意图** | `PreToolUse(AskUserQuestion/Bash)` | ✅ exit 2 |
 | G6 收口 | 旁路采集 | 只记录 + 用量提示，不阻断 |
 
 > ⚠️ **matcher 用 `Agent`，不是 `Task`。**
