@@ -17,13 +17,13 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **160 项**）：
+提交前必须全部通过（共 **167 项**）：
 
 ```bash
 python tests/four_gate_selftest.py    # 53/53
 python tests/cmd_chain_test.py        # 21/21
 python tests/adversarial_test.py      # 24/24
-python tests/budget_safety_test.py    # 23/23
+python tests/budget_safety_test.py    # 30/30
 python tests/intent_gate_test.py      # 21/21
 python tests/upgrade_path_test.py     # 18/18
 ```
@@ -106,7 +106,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 160 项测试全部通过
+[ ] 167 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 已在 CHANGELOG.md 添加条目

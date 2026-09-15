@@ -79,6 +79,35 @@ for val, want_max, why in cases:
     check("agent_spawns: %-22s -> %s（%s）" % (val[:22], got, why), ok,
           "期望 %s，实际 %s" % (want_max, got))
 
+print("\n===== #47：引用/讨论里的声明不能被当成真实指令 =====")
+# 实测背景：用户贴了一份含 `agent_spawns: 3` 的长篇点评，
+# 门把它当成"用户显式声明预算 3"。修前 G1 完全没有 use-mention 剥离。
+_ref_cases = [
+    ("朋友点评", "朋友说：我不会支持 agent_spawns = 0，还提到 agent_spawns: 3", 0),
+    ("代码块", "```\nagent_spawns: 5\n```\n这是示例", 0),
+    ("行内代码", "这个 `agent_spawns: 7` 是配置项", 0),
+    ("引号引用", "他说「agent_spawns: 9」", 0),
+    ("报告建议", "报告建议 agent_spawns: 2 到 3 之间", 0),
+]
+for label, prompt, want in _ref_cases:
+    call("inject_budget.py", {"session_id": "ref", "prompt": prompt})
+    st = budget_of("ref") or {}
+    got = st.get("budget", {}).get("agent_spawns")
+    check("引用不该生效：%s -> %s" % (label, got), got == want,
+          "期望 %s（默认），实际 %s" % (want, got))
+
+# 对照：真实声明必须仍然生效（不能矫枉过正）
+_real_cases = [
+    ("裸声明", "帮我调研，agent_spawns: 3", 3),
+    ("夹在句中", "这个任务 agent_spawns: 2 可以派", 2),
+]
+for label, prompt, want in _real_cases:
+    call("inject_budget.py", {"session_id": "real", "prompt": prompt})
+    st = budget_of("real") or {}
+    got = st.get("budget", {}).get("agent_spawns")
+    check("真实声明仍生效：%s -> %s" % (label, got), got == want,
+          "期望 %s，实际 %s" % (want, got))
+
 print("\n===== BUG-2：类型不合法时保守处理 =====")
 f = os.path.join(T, "typ.budget.json")
 os.makedirs(os.path.dirname(f), exist_ok=True)

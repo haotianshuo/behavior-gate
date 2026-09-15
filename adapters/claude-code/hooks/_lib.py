@@ -634,6 +634,88 @@ BUDGET_LINE = re.compile(
     r"\b(agent_spawns|agent_depth)\s*[:=]\s*([0-9]+)",
     re.I)
 
+
+def strip_referenced_text(text):
+    """剔除【被引用/被讨论】的文本，只留【对 AI 说的话】。
+
+    ⚠️ 为什么需要（3.5.10 新增，见 #47）：
+        实测缺陷：用户在 prompt 里**引用别人的文字**时，其中的示例
+        会被当成真实预算声明。四个场景全部误判：
+
+            真实声明「agent_spawns: 3」        → 3  ✓（唯一正确）
+            引用朋友点评「…agent_spawns: 3」   → 3  ✗ 不该命中
+            ```代码块里写 agent_spawns: 5```   → 5  ✗ 不该命中
+            「这个 agent_spawns: 0 太死板了」  → 0  ✗ 不该命中
+
+        本会话真实发生过：用户贴了一份长篇点评，里面多处出现
+        `agent_spawns = 0` / `agent_spawns: 3` 作为**论述对象**，
+        结果门认为"用户显式声明了预算 3"。
+
+    这是 use-mention 问题的又一实例 —— 与 G3 的同类问题同源。
+    G3 早就修了（effect_gate._strip_quoted_context），
+    G1 一直没修。**同一条规则只在一侧生效**，正是本项目反复出现的形状。
+    所以这次提到 _lib 共享，而不是再抄一份。
+
+    剔除范围（与 G3 保持一致）：
+        · ``` 围栏代码块
+        · `行内代码`
+        · "双引号" / “中文双引号”
+        · 「」『』中文引号
+        · > 块引用行
+
+    刻意【不】剔除单引号 —— 它太常见（it's / 变量名），会误伤正文。
+    """
+    if not text:
+        return ""
+    t = text
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    t = re.sub(r"`[^`\n]*`", " ", t)
+    t = re.sub(r"\"[^\"\n]{0,200}\"", " ", t)
+    t = re.sub(r"[“”][^“”\n]{0,200}[“”]", " ", t)
+    t = re.sub(r"[「『][^」』\n]{0,200}[」』]", " ", t)
+    t = re.sub(r"^[ \t]*>.*$", " ", t, flags=re.M)
+    return t
+
+
+# 声明前的「讨论/否定」语境词（#47 第二道防线）。
+#
+# ⚠️ 这道防线【不完整】—— 必须说清它的边界：
+#    上面 strip_referenced_text() 只对【带标记】的引用有效
+#    （代码块 / 引号 / 块引用）。而用户经常贴【裸文本】的长篇点评，
+#    里面 `agent_spawns: 3` 没有任何标记 —— 剥离函数无从下手。
+#
+#    实测最接近真实场景的一条：
+#        「朋友说：我不会支持 agent_spawns = 0，还提到 agent_spawns: 3」
+#    剥离后仍是原文 → 被当成真实声明。
+#
+#    第二道防线：看声明【前面 25 字内】有没有讨论/否定语境词。
+#    实测能挡住上面那条，但挡不住：
+#        「agent_spawns: 0 这个默认值是不是太死板了」← 语境词在后面
+#
+#    所以最终结论必须诚实：
+#      · 带标记的引用     → 可靠剔除
+#      · 裸文本引用       → 大幅减少误判，但【不能根除】
+#      · 根本方案是要求用户把引用放进代码块（README 已说明）
+#    这是机械匹配的固有上限，不假装解决。
+DISCUSSION_CTX = re.compile(
+    r"(不会支持|不支持|不要|别用|反对|讨论|提到|举例|例如|比如|所谓|"
+    r"是不是|太死板|建议|点评|报告|文档|说明|参考|quote|quoted|"
+    r"not\s+support|don'?t|does\s+not)", re.I)
+
+
+def _drop_discussed_hits(text, rx):
+    """剔除【前面紧邻讨论语境】的匹配。返回剩下的匹配列表。
+
+    text 必须已经过 strip_referenced_text()。
+    """
+    out = []
+    for m in rx.finditer(text):
+        before = text[max(0, m.start() - 25):m.start()]
+        if DISCUSSION_CTX.search(before):
+            continue
+        out.append(m.group(1, 2))
+    return out
+
 # 硬上限（BUG-1 修复）。
 # 这是最后一道防线：即使用户/模型在 prompt 里写天文数字，也不会突破它。
 # 为什么需要：G1 的全部价值是「上限不可绕过」——
@@ -666,14 +748,28 @@ def parse_budget_from_prompt(prompt, policy):
     source = "policy-default"
 
     if prompt:
-        if SPAWN_FORBID.search(prompt):
+        # ⚠️ 只在【用户真正说的】文本上判定，剔除引用/代码块/讨论（#47）。
+        #    修前是对整个 prompt 做 matching —— 用户贴一篇提到
+        #    `agent_spawns: 3` 的文章，就会被当成"用户要 3 个"。
+        said = strip_referenced_text(prompt)
+
+        # 口语信号同样要过讨论语境（#47 同类）。
+        # 否则「他在质疑『不要开后台』这条规则」会被当成用户禁止后台。
+        _forbid = [m.group(0) for m in SPAWN_FORBID.finditer(said)
+                   if not DISCUSSION_CTX.search(said[max(0, m.start()-25):m.start()])]
+        _permit = [m.group(0) for m in SPAWN_PERMIT.finditer(said)
+                   if not DISCUSSION_CTX.search(said[max(0, m.start()-25):m.start()])]
+
+        if _forbid:
             budget["agent_spawns"] = 0
             source = "prompt:forbid"
-        elif SPAWN_PERMIT.search(prompt):
+        elif _permit:
             budget["agent_spawns"] = 3   # 显式许可；不是无限，仍封顶
             source = "prompt:permit"
 
-        hits = BUDGET_LINE.findall(prompt)
+        # 第二道防线：剔除紧邻讨论语境的匹配（#47）。
+        # findall 换成 _drop_discussed_hits，语义等价但会跳过"被讨论的"。
+        hits = _drop_discussed_hits(said, BUDGET_LINE)
         if hits:
             for key, val in hits:
                 # BUG-2 修复：类型/取值校验。

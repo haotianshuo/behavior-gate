@@ -1,12 +1,12 @@
 # 行为门安装说明
 
-> 对应版本：**V3.5.9** ｜ 2026-09-14
+> 对应版本：**V3.5.10** ｜ 2026-09-14
 >
 > ⚠️ **它证明不了什么，和它能拦什么同样重要 —— 见下面的「已知边界」。**
 > 一句话：门管的是「行动方式」和「格式」，不是「判断对不对」。
 > `判定: MATCH` / `自检通过` / `证据：L3` 都**不等于**内容已被核实。
-> 当前实测：四关 53/53、安装链路 21/21、对抗 24/24、预算安全 23/23、
-> 　　　　　意图门 21/21、升级路径 18/18（=160 项）+ 1:1 复刻 13/13
+> 当前实测：四关 53/53、安装链路 21/21、对抗 24/24、预算安全 30/30、
+> 　　　　　意图门 21/21、升级路径 18/18（=167 项）+ 1:1 复刻 13/13
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -55,12 +55,12 @@ python install.py --scope global --apply   # 安装
 python tests/four_gate_selftest.py    # 期望 53/53
 python tests/cmd_chain_test.py        # 期望 21/21
 python tests/adversarial_test.py      # 期望 24/24
-python tests/budget_safety_test.py    # 期望 23/23
+python tests/budget_safety_test.py    # 期望 30/30
 python tests/intent_gate_test.py      # 期望 21/21
 python tests/upgrade_path_test.py     # 期望 18/18
 ```
 
-**合计 160 项。** 也可以一次跑完：
+**合计 167 项。** 也可以一次跑完：
 
 ```bash
 python tools/verify_portable.py       # 可移植性校验
@@ -172,7 +172,7 @@ malicious-writer-proof、不可抵赖、密码学不可篡改 ——
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          六套测试（=160 项）
+└─ tests/                          六套测试（=167 项）
 ```
 
 ### 五道门

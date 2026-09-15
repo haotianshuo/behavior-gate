@@ -2,7 +2,7 @@
 
 > 给 Claude Code 加五道**机械门**，治「AI 助手想多做、做了却说完成了」这类毛病。
 >
-> 当前版本：**V3.5.9** ｜ 2026-09-14
+> 当前版本：**V3.5.10** ｜ 2026-09-14
 > 许可证：[MIT](LICENSE)
 
 ---
@@ -129,13 +129,13 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **160 项**全过）：
+跑测试（预期 **167 项**全过）：
 
 ```bash
 python tests/four_gate_selftest.py    # 53/53
 python tests/cmd_chain_test.py        # 21/21
 python tests/adversarial_test.py      # 24/24
-python tests/budget_safety_test.py    # 23/23
+python tests/budget_safety_test.py    # 30/30
 python tests/intent_gate_test.py      # 21/21
 python tests/upgrade_path_test.py     # 18/18
 ```
@@ -210,14 +210,14 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（46 项真实问题）
+├─ CHANGELOG.md                    变更记录（47 项真实问题）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
 │   ├─ settings.fragment.json      hook 配置片段
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          六套测试（160 项）
+└─ tests/                          六套测试（167 项）
 ```
 
 ---
