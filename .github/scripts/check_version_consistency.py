@@ -70,6 +70,31 @@ def main():
         if found != ver:
             problems.append("%s: %s != %s" % (rel, found, ver))
 
+    # --- 变更记录项数一致性（3.5.7 新增，见 #40）---
+    # 为什么加：README 里「N 项真实问题」这个数字【手工维护】，
+    # 已经过期两次（#32 修过一次，3.5.6 又过期）。
+    # 手工维护的数字必然复发 —— 所以让它自动核对。
+    changelog = root / "CHANGELOG.md"
+    if changelog.exists():
+        text = changelog.read_text(encoding="utf-8")
+        nums = [int(x) for x in re.findall(r"^\| (\d+) \|", text, re.M)]
+        if nums:
+            actual = max(nums)
+            print("[check_version] CHANGELOG max issue number = %d" % actual)
+            for rel, pat in [
+                ("README.md", r"变更记录（(\d+) 项"),
+                ("CHANGELOG.md", r"## 全部问题与修复（(\d+) 项"),
+            ]:
+                f = root / rel
+                if not f.exists():
+                    continue
+                m = re.search(pat, f.read_text(encoding="utf-8"))
+                if not m:
+                    continue
+                if int(m.group(1)) != actual:
+                    problems.append(
+                        "%s: 声称 %s 项，实际 %d 项" % (rel, m.group(1), actual))
+
     if problems:
         print("[check_version] FAIL: version identity inconsistent")
         for p in problems:

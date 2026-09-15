@@ -2,7 +2,7 @@
 
 > 给 Claude Code 加五道**机械门**，治「AI 助手想多做、做了却说完成了」这类毛病。
 >
-> 当前版本：**V3.5.6** ｜ 2026-09-14
+> 当前版本：**V3.5.7** ｜ 2026-09-14
 > 许可证：[MIT](LICENSE)
 
 ---
@@ -210,7 +210,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（35 项真实问题）
+├─ CHANGELOG.md                    变更记录（40 项真实问题）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
 │   ├─ settings.fragment.json      hook 配置片段

@@ -481,11 +481,18 @@ DEFAULT_POLICY = {
     },
     "effect_gate": {
         "enabled": True,
-        "min_risk_level": "medium",   # low | medium | high
+        # ⚠️ 曾经这里有 min_risk_level: "medium"。3.5.7 删除（#39）。
+        #    它没有任何 .get() 访问 —— 改它不生效。
+        #    风险分级实际由 effect_gate.py 的 REQUIRED 硬编码实现
+        #    （低→L1 / 中→L2 / 高→L3），意图已达成，这个键是多余的。
     },
     "destructive_gate": {
         "enabled": True,
-        "deny_patterns": [],
+        # ⚠️ 曾经这里有 deny_patterns: []。3.5.7 删除（#39）。
+        #    同样没有 .get() 访问。用户想加拦截规则应该用
+        #    cmd_deny / content_deny（这两个是真的被读的，见
+        #    destructive_gate.py:117-118）—— deny_patterns 是旧设计的残留。
+        #    warn_patterns 保留：它在 destructive_gate.py:119 被真的读取。
         "warn_patterns": [],
     },
     "closeout": {"enabled": True},

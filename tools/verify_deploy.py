@@ -43,6 +43,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -234,10 +235,17 @@ def check_dead_sections(policy, hooks_dir):
       人扫一次能发现问题，但【挡不住下一次】。所以做成自动的。
 
     判定方法：
-      段名（如 "closeout"）在 hooks 目录的 .py 文件里必须至少被引用一次。
-      只出现在 policy 文件自身、注释、或字符串里不算数吗？——
-      算。因为门读它时必然要写出字面量段名（policy.get("closeout")）。
-      实测的两次缺陷都是 0 处引用。
+      段名必须作为【访问表达式】出现，即 policy.get("段名") 或 policy["段名"]。
+
+      ⚠️ 初版规则是「任意带引号的字面量即算被读」，3.5.7 修正（见 #38）。
+         它结构性地抓不到 closeout 那类死段，原因：
+           _lib.py 的 DEFAULT_POLICY 为每一个段都写了一遍段名，
+           → 段名永远躺在 .py 里 → 永远判活，无论死得多彻底。
+         实测：在 v3.5.0（closeout 与 gateway_budget 都真死）上，
+         初版规则只抓到 1 个，漏掉 closeout；收紧后两个都抓到，
+         且对真活的段零误报。
+         另一处误救：closeout_gate.py 的 state_path(session_id, "closeout")
+         是状态文件名，不是 policy 读取，但字面量相同。
 
     为什么不直接删掉死段：
       删掉是修复手段之一，但【先要让人看见】。自动报出来之后，
@@ -258,18 +266,33 @@ def check_dead_sections(policy, hooks_dir):
                 pass
     blob = "\n".join(sources)
 
-    for section in policy:
+    for section, value in policy.items():
         if section.startswith("_"):
             continue
-        # 段名作为字面量出现（单双引号都算）
-        if ('"%s"' % section) in blob or ("'%s'" % section) in blob:
+        # 必须是访问表达式，不能是任意字面量（见上方 ⚠️）
+        access = r'(\.get\(\s*["\']%s["\']|\[\s*["\']%s["\']\s*\])' % (section, section)
+        if not re.search(access, blob):
+            problems.append(
+                "DEAD     策略段没有任何 hook 读取: %s\n"
+                "           在 %s 下的 .py 里找不到 policy.get(%r) 形式的访问。\n"
+                "           这是「假能力」的一种：声明存在，但永远不会生效。\n"
+                "           处理：要么删掉该段，要么接上实现 —— 不要留着。"
+                % (section, hooks_dir, section))
             continue
-        problems.append(
-            "DEAD     策略段没有任何 hook 读取: %s\n"
-            "           在 %s 下的 .py 里找不到段名 %r 的字面量引用。\n"
-            "           这是「假能力」的一种：声明存在，但永远不会生效。\n"
-            "           处理：要么删掉该段，要么接上实现 —— 不要留着。"
-            % (section, hooks_dir, section))
+
+        # 段内键（3.5.7 新增）：#2 那个形状（bash_rounds / webfetch）
+        # 是段里的键，只看顶层段会结构性地漏掉它。
+        if isinstance(value, dict):
+            for key in value:
+                if key.startswith("_"):
+                    continue
+                kaccess = r'(\.get\(\s*["\']%s["\']|\[\s*["\']%s["\']\s*\])' % (key, key)
+                if not re.search(kaccess, blob):
+                    problems.append(
+                        "DEAD     策略键没有任何 hook 读取: %s.%s\n"
+                        "           段本身有读取者，但这个键没有。\n"
+                        "           处理：要么删掉该键，要么接上实现。"
+                        % (section, key))
     return problems
 
 
