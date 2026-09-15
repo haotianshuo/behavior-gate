@@ -34,7 +34,7 @@
 ├─ tools/
 │   ├─ verify_deploy.py            部署校验
 │   └─ verify_portable.py          可移植性校验
-└─ tests/                          六套测试（154 项）
+└─ tests/                          六套测试（160 项）
 ```
 
 ---
@@ -48,7 +48,7 @@ python install.py
 # 应用安装
 python install.py --apply
 
-# 全部测试（154 项，提交前必须通过）
+# 全部测试（160 项，提交前必须通过）
 python tests/four_gate_selftest.py
 python tests/cmd_chain_test.py
 python tests/adversarial_test.py
@@ -114,7 +114,7 @@ python tools/verify_deploy.py
 
 ## 测试要求
 
-**任何改动都必须保证 154 项测试全部通过。**
+**任何改动都必须保证 160 项测试全部通过。**
 
 新增功能需附带测试。测试文件放在 `tests/`，遵循现有格式。
 

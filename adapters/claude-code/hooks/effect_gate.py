@@ -30,11 +30,21 @@ from _lib import (  # noqa: E402
 # 完成类措辞。
 # ⚠️ 这张表要覆盖【所有】完成语义，不能只覆盖"修复"。
 # 实测漏过一次：「已部署」不在表里 → 高风险任务宣布部署完成时静默放行。
+#
+# ⚠️ 词表的固有上限（3.5.9 补充说明，见 #45）：
+#    外部复核实测 10 条常见收尾，其中 6 条漏网（「全部搞定，收工。」「任务结束。」
+#    「搞好了。」「弄好了。」「写好了。」「做好了。」等）。已补进下表。
+#    但要诚实：中文的表达空间是开放的，【词表永远列不全】。
+#    这条边界必须在文档里说清，而不是靠不断加词来假装解决。
+#    真正能兜住的是：证据块要求（结构性）+ 人（最后一道防线）。
 CLAIM_RX = re.compile(
-    r"(已修复|已经修复|修复完成|已改好|改好了|已完成|完成了|已解决|解决了"
-    r"|验证通过|已验证|测试通过|全部通过|已通过|已跑通"
-    r"|已实现|搞定了|没问题了|已生效|现在可以了"
-    r"|已部署|部署完成|已上线|上线完成|已发布|已提交|已推送|已合并|已落盘|已写入)"
+    r"(已修复|已经修复|修复完成|已改好|改好了|修好了|已完成|完成了|写好了|做好了"
+    r"|已解决|解决了|问题没有了|没问题了|已弄好|弄好了|弄完了|弄完"
+    r"|验证通过|已验证|测试通过|全部通过|已通过|已跑通|跑过了"
+    r"|已实现|搞定了|全部搞定|搞好了|已生效|现在可以了"
+    r"|已部署|部署完成|已上线|上线完成|已发布|已提交|已推送|已合并|已落盘|已写入"
+    r"|收工|任务结束|工作结束|到此结束|可以了"
+    r"|一切正常|一切就绪|都正常|全部正常)"
 )
 
 # 证据块标题。必须容忍 markdown 粗体 —— `**证据**：` 是最常见的写法。
@@ -55,6 +65,27 @@ UNVERIFIED_RX = re.compile(
 BARE_UNVERIFIED_RX = re.compile(
     r"^[\s\-*•>#]*(\bNOT_MEASURED\b|\bNOT_VERIFIED\b|未验证|未实测|未做验证|没有验证)"
     r"[。.；;，,、!！\s]*$", re.I)
+
+# ⚠️ 「未验证项：无」是【否定】不是【声明】（3.5.9 新增，见 #43）。
+#
+#    实测缺陷（外部复核发现，坐实）：
+#        G3 被拦时打印的模板要求写这一行 ——
+#            - 未验证项：<明确列出；没有就写「无」>
+#        而当用户真的照写「- 未验证项：无」时，它被当成【承认有未验证】，
+#        走进 declared_unverified 豁免分支，于是：
+#             风险=高 + 证据=L1（按门规则应当拦）
+#             → 只要写「- 未验证项：无」就【放行】
+#        换成「- 遗留事项：无」则正常拦截。
+#
+#    即：门自己要求的字段名，成了绕过门检查的钥匙。
+#    这比"漏判"更糟 —— 它奖励照做的人，惩罚不照做的人。
+#
+#    判据：字段名 + 冒号 + 空值（无 / 没有 / 无此项 / none / - / 空）
+#          = 该行陈述的是「没有未验证项」，不构成"承认有未验证"。
+NEGATED_UNVERIFIED_RX = re.compile(
+    r"^[\s\-*•>#]*(\b未验证项\b|\b未验证内容\b|\b未验证的?\b|未实测项|"
+    r"unverified(\s+items?)?|not\s+verified\s+items?)"
+    r"\s*[:：]\s*(无|没有|无此项|暂无|none|n/?a|-|—|\s)*$", re.I)
 
 # 证据级别。⚠️ 顺序要紧：L3 必须排在 L1 前面，
 # 否则 "L3" 里的字符会被更宽松的规则先吃掉（历史踩坑）。
@@ -142,6 +173,8 @@ def _has_binding_unverified(text):
             continue
         if BARE_UNVERIFIED_RX.match(line.strip()):
             continue        # 光秃秃的免责声明，不构成声明
+        if NEGATED_UNVERIFIED_RX.match(line.strip()):
+            continue        # 「未验证项：无」= 否定，不是"承认有未验证"（#43）
         return True
     return False
 
@@ -149,9 +182,30 @@ def _has_binding_unverified(text):
 def main():
     data = read_input()
 
-    # 防死循环：官方要求的提前退出
-    if data.get("stop_hook_active") is True:
-        allow()
+    # ⚠️ stop_hook_active 的正确用法（3.5.9 修正，见 #43）。
+    #
+    #    官方文档原文（hooks.md）：
+    #      "The stop_hook_active field is true when Claude Code is already
+    #       continuing as a result of a stop hook. Check this value or
+    #       process the transcript to avoid blocking on a condition that
+    #       will never resolve. Claude Code overrides the hook and ends the
+    #       turn after 8 consecutive blocks."
+    #
+    #    修前：`if stop_hook_active: allow()` —— 无条件放行，不看内容。
+    #    后果（外部复核实测，坐实）：模型被打回后【原样重发同一句话】
+    #    即可通过。门的强制力从"最多 8 次"实际降到 1 次。
+    #
+    #    修法：仍然判定内容 —— 只把【本次的拒绝】从"阻断"降级为"放行 + 告警"。
+    #    这样：
+    #      · 内容不合规时，第一次仍会拦（强制力保留）
+    #      · 不会无限循环（第二次必放行，不为难用户）
+    #      · 但【放行这件事是可见的】—— 用户能看到"门放行了不合规的收尾"
+    #
+    #    刻意不做的：不解析 transcript 去比较"是否原样重发"。
+    #    那需要读 transcript 文件、引入 IO 与解析失败面，
+    #    而这个门的设计原则是 fail-open 且不能成为新的崩溃源。
+    #    用"拦一次"换取"简单且不会坏"，是这里值得的取舍。
+    retry = data.get("stop_hook_active") is True
 
     policy = load_policy()
     if not policy.get("effect_gate", {}).get("enabled", True):
@@ -175,6 +229,22 @@ def main():
     #
     #    修法：在入口处统一剥一次，之后所有判定都只看"断言"。
     asserted = _strip_quoted_context(msg)
+
+    # 不合规时的统一出口（#43）。
+    # 三处 deny_stop 都改走这里 —— 「拦一次」的语义只有一处实现，
+    # 避免"改了两处漏了第三处"（本项目 #19 的老毛病）。
+    def _reject(reason):
+        """首次阻断；重试轮次放行，但【放行必须可见】。"""
+        if retry:
+            sys.stderr.write(
+                "【G3 生效门】本轮为重试轮次 → 已放行（不再次阻断）。\n"
+                "  原因：平台在连续阻断 8 次后会强制结束回合，重复阻断无意义。\n"
+                "  ⚠️ 但本次收尾仍【不合规】，这是【可见的放行】，不是通过：\n"
+                "  %s\n"
+                % reason.splitlines()[0])
+            sys.stderr.flush()
+            allow()
+        deny_stop(reason)
 
     claim, level, level_num, risk = analyze(asserted)
     if not claim:
@@ -225,7 +295,7 @@ def main():
             # 未验证声明与完成声明不在同一段 —— 不是矛盾
             allow()
         # 同一段里既说"未验证"又宣布【目标达成】 → 自相矛盾，打回
-        deny_stop(
+        _reject(
             "【G3 生效门】自相矛盾的收尾：一边说「未验证」，一边宣布「%s」。\n"
             "\n"
             "  「未验证」和「已完成/已修复」不能同时成立 ——\n"
@@ -253,7 +323,7 @@ def main():
 
     # 说"完成了"但根本没写 NOT_MEASURED / 证据
     if not has_block:
-        deny_stop(
+        _reject(
             "【G3 生效门】你宣布了完成，但本回合没有生效证据块。\n"
             "\n"
             "  触发词：「%s」\n"

@@ -44,6 +44,34 @@ CMD_DENY = [
         "instead": "写出完整、具体的路径，并先 `ls` 确认目标。",
     },
     {
+        # 3.5.9 新增（#44）。外部复核实测：本机是 Windows 11，
+        # 而上面那条规则只认 POSIX 根（/ ~ $HOME *），于是
+        #     rm -rf D:/   /  rm -rf C:/   /  rm -rf C:/Users/<用户>
+        # 全部【放行】—— 在 Windows 上等于没有保护。
+        # 被 /d/... 拦住是巧合（它以 / 开头），不是设计了 Windows 支持。
+        "id": "rm_rf_windows_drive",
+        "pattern": r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+"
+                   r"([A-Za-z]:[\\/]?(\s|$|\*)|"
+                   r"[A-Za-z]:[\\/][^\\/\s]+[\\/]?\s*$|"
+                   r"[A-Za-z]:[\\/](Users|Windows|Program))",
+        "why": "递归强删 Windows 盘符根、盘符下第一层目录、或系统目录。\n"
+               "  实测：`rm -rf D:/` 与 `rm -rf C:/Users/<用户>` 此前全部放行 ——\n"
+               "  规则只认 POSIX 根路径，在本机（Windows 11）等于没有保护。\n"
+               "  取舍：只拦到【盘符 + 第一层】（D:/important）。\n"
+               "  D:/myproj/build 这类更深的项目路径不拦 —— 那是常规清理，\n"
+               "  机械规则区分不了「重要目录」与「项目内构建目录」。",
+        "instead": "写出完整的具体路径（如 D:/myproj/build），并先 `ls` 确认目标。",
+    },
+    {
+        "id": "rm_rf_windows_env",
+        "pattern": r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*r[a-zA-Z]*f?\s+"
+                   r"(\$env:(TEMP|TMP|USERPROFILE)|\$TEMP|\$TMP|\$USERPROFILE|\$HOME)"
+                   r"([\\/](\s|$|\*))?",
+        "why": "递归强删 Windows 环境变量指向的目录（临时目录/用户目录）。\n"
+               "  实测 `rm -rf $env:TEMP/x` 与 `rm -rf $TEMP/x` 此前放行。",
+        "instead": "写出完整的具体路径，并先 `ls` 确认目标。",
+    },
+    {
         "id": "posix_tmp_on_windows",
         "pattern": r"\b(find|ls|rm|cat|du|grep|chmod|chown)\b[^\n|;&]*\s/tmp(/|\s|$)",
         "why": "Git Bash on Windows 下 /tmp 会解析到 C:\\tmp。\n"

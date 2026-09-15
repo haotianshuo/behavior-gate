@@ -75,6 +75,41 @@ def main():
             bad.append(cmd)
     an("9 条日常命令全部放行", not bad, "被误伤: %s" % bad)
 
+    # --- Windows 路径覆盖（#44）---
+    # 外部复核实测：规则原先只认 POSIX 根（/ ~ $HOME *），
+    # 本机是 Windows 11，于是 `rm -rf D:/` 与 `rm -rf C:/Users/<用户>`
+    # 全部放行 —— 在 Windows 上等于没有保护。
+    RM = "rm -rf "          # 拼接，避免本测试文件自身被 G5 拦（行首锚定）
+    win_danger = [RM + "D:/", RM + "C:/", RM + "D:/important",
+                  RM + "C:/Users/Zeng", RM + "C:/Windows/System32",
+                  RM + "$TEMP/x", RM + "$env:TEMP/x"]
+    missed_win = [c for c in win_danger
+                  if run("destructive_gate.py",
+                         {"session_id": sid, "tool_name": "Bash",
+                          "tool_input": {"command": c}}, tmp) != 2]
+    an("Windows 危险路径全部拦住", not missed_win, "漏过: %s" % missed_win)
+
+    win_safe = [RM + "./build", RM + "./dist", RM + "node_modules",
+                RM + "D:/myproj/build", RM + "D:/myproj/dist",
+                RM + "./tmp/cache"]
+    hurt_win = [c for c in win_safe
+                if run("destructive_gate.py",
+                       {"session_id": sid, "tool_name": "Bash",
+                        "tool_input": {"command": c}}, tmp) != 0]
+    an("常规项目清理不被误伤", not hurt_win, "被误伤: %s" % hurt_win)
+
+    # --- 完成词表覆盖（#45）---
+    # 外部复核实测 10 条常见收尾措辞，其中 6 条漏网。已补。
+    # ⚠️ 这个用例锁定的是【已补的这些】不再漏 —— 不是"词表已完整"。
+    #    中文表达空间开放，词表永远列不全，那是已知边界（见 effect_gate 注释）。
+    more_claims = ["全部搞定，收工。", "任务结束。", "已经弄好了.",
+                   "代码已经写好了。", "OK，一切正常。", "跑过了，没问题。"]
+    not_caught = [m for m in more_claims
+                  if run("effect_gate.py",
+                         {"session_id": sid, "stop_hook_active": False,
+                          "last_assistant_message": m}, tmp) != 2]
+    an("补充的完成措辞能被识别", not not_caught, "仍漏: %s" % not_caught)
+
     print("\n===== B. 写作场景不能误伤（互审发现的真实缺陷） =====")
     docs = [
         ("write", "审计报告.md", "deepseek 跑过 pkill -f \"proxy.mjs\"，侥幸没中招"),

@@ -190,7 +190,48 @@ def main():
                   {"session_id": sid3, "stop_hook_active": True,
                    "last_assistant_message": "已经修复了。"},
                   tmp)
-    check("防死循环：stop_hook_active=true 时强制放行", c == 0, "exit=%d" % c)
+    # ⚠️ 断言已修正（#43）：修前这里断言"无条件放行"，
+    #    而那正是「原样重发即可通过」的缺陷。
+    #    现在的语义是：重试仍放行（防死循环），但【放行必须可见】。
+    check("重试轮次放行，且放行可见",
+          c == 0 and "可见的放行" in e,
+          "exit=%d stderr=%s" % (c, e[:200]))
+
+    # --- #43 回归用例：G3 提示模板自己要求的字段，不能成为绕过门的钥匙 ---
+    #
+    # 实测缺陷（外部复核发现）：门被拦时打印的模板要求写
+    #     - 未验证项：<明确列出；没有就写「无」>
+    # 而用户真的照写「- 未验证项：无」时，它被当成【承认有未验证】，
+    # 走进豁免分支 → 风险=高 + 证据=L1 被放行。
+    # 换成「- 遗留事项：无」则正常拦截。
+    #
+    # 为什么原 154 项没抓到：所有 G3 用例的证据块都不含「未验证项」那一行 ——
+    # 测试是按门的【规则】写的，不是按门【要求用户照写的模板】写的。
+    _tmpl = ("**证据**：%s\n**风险级别**：高\n"
+             "- 用户下次会看到什么不同：X\n- 在哪看：Y\n- 我怎么确认它生效了：Z")
+
+    c, o, e = run("effect_gate.py",
+                  {"session_id": sid3, "stop_hook_active": False,
+                   "last_assistant_message":
+                       "已完成修复。\n\n" + _tmpl % "L1 静态" + "\n- 未验证项：无"},
+                  tmp)
+    check("按模板写『未验证项：无』不能豁免等级检查", c == 2,
+          "exit=%d（L1 撑高风险应被拦）" % c)
+
+    c, o, e = run("effect_gate.py",
+                  {"session_id": sid3, "stop_hook_active": False,
+                   "last_assistant_message":
+                       "已改完。\n\n" + _tmpl % "L1 静态" + "\n- 未验证项：MCP matcher 未验证"},
+                  tmp)
+    check("『未验证项：<具体内容>』仍算诚实声明（不惩罚诚实）", c == 0,
+          "exit=%d" % c)
+
+    c, o, e = run("effect_gate.py",
+                  {"session_id": sid3, "stop_hook_active": False,
+                   "last_assistant_message":
+                       "已完成。\n\n" + _tmpl % "L3 端到端" + "\n- 未验证项：无"},
+                  tmp)
+    check("L3 证据 + 未验证项：无 正常放行", c == 0, "exit=%d" % c)
 
     print("\n===== G6：收口旁路 =====")
     sid4 = "selftest-g6"
