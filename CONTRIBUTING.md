@@ -17,7 +17,7 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **296 项**）：
+提交前必须全部通过（共 **313 项** = 12 套功能测试 296 + 检查器 17）：
 
 ```bash
 python tests/four_gate_selftest.py        # 53/53
@@ -126,7 +126,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 296 项测试全部通过
+[ ] 313 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 如改了 hook，已刷新源身份（tools/source_identity.py --write）
@@ -156,7 +156,7 @@ Closes #31
 
 ```text
 [ ] 1. 确认工作区干净、测试全过
-        python tests/*.py            # 296 项
+        python tests/*.py            # 313 项
         git status --short           # 应为空
 
 [ ] 2. 升版本号（改 hook 就必须升）
