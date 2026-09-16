@@ -60,6 +60,9 @@ jobs:
       - name: 安装参数回归
         run: python tests/install_cli_test.py
 
+      - name: MCP 字段分派
+        run: python tests/mcp_field_dispatch_test.py
+
       - name: 版本一致性
         run: python .github/scripts/check_version_consistency.py
 

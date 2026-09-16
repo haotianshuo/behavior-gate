@@ -58,6 +58,28 @@ _RM_OPTS = (r"(?=(?:-{1,2}\S+\s+)*-\S*[rR]\S*\s)"   # 必须含递归标志
 _RM_ROOT_TAIL = r"(\s|$|\*)"                         # 结尾锚定：恰好是根
 
 
+# ---- MCP 字段名 → 规则集 的显式名单（3.5.10 / #53）----
+#
+# ⚠️ 为什么是【精确名单】而不是子串匹配：
+#    修前用 `"content" in name or "text" in name or "body" in name`，
+#    而 `"text" in "context"` == True —— 字段名叫 context 的被误判成内容字段。
+#    这与 #3（`bg-` 子串误配）是同一形状：**用子串当身份判据**。
+#    那边的 _is_ours 已改成精确判定，这里没跟上。
+#
+# 名单外的字段不猜 —— 走「两套规则都过」的保守分支（见下面的注释）。
+MCP_CONTENT_FIELDS = {
+    # 写入内容 / 文本载荷。这些字段承载的是"文字"，不是"正在执行的命令"。
+    "content", "text", "body", "new_string", "new_str",
+    "old_string", "old_str", "file_text", "contents",
+}
+
+MCP_CMD_FIELDS = {
+    # 会被执行的命令 / 脚本。这些字段的值可能真的进 shell。
+    "command", "cmd", "script", "shell", "exec", "argv", "args",
+    "code", "input", "data", "payload", "stdin",
+}
+
+
 # ⚠️ 不变量（3.5.10 / #48 确立）：**每条规则只作用于语义对应的字段**。
 #
 #   字段语义矩阵 —— 改规则前先看这张表，别把规则放进不对的字段：
@@ -292,14 +314,63 @@ def main():
         # 逐字段取真实值，而不是 repr(整体) —— 让锚定在 MCP 通道同样成立。
         # 但【不】把两套规则混用：命令类字段 → cmd_rules，
         # 内容类字段 → content_rules。
+        #
+        # ⚠️ 3.5.10 修复（#53）：分类判据从【裸子串】改成【显式名单】。
+        #
+        #    修前是：
+        #        if "content" in name or "text" in name or "body" in name:
+        #   而 `"text" in "context"` == True —— 于是字段名叫 `context` /
+        #   `context_id` / `subtext` 的会被当成【内容字段】，分到 content_rules。
+        #   而 cmd 类规则（rm_rf_windows_drive 等 5 条）只在 cmd_rules 里 ——
+        #   两边都够不着，等于【静默漏拦】。
+        #
+        #   同一处判据还造成【反方向】的错：
+        #       自由文本字段（prompt / description）不含 content/text/body
+        #       → 落进 else → 被当成命令字段 → 套 cmd_rules
+        #       → 写一句「分析一下 pkill 为什么危险」就被 fuzzy_kill 拦。
+        #   实测（本机真实工具 mcp__scheduled-tasks__*）：
+        #       {"prompt": "分析一下 pkill 这类命令为什么危险"} → 拦 ✗
+        #
+        #   根因：**字段名判不出字段语义**，而裸子串让名字判断更不可靠。
+        #   这与 #3（`bg-` 子串误配）是同一形状 —— 那边的 _is_ours 后来
+        #   改成了按 basename 精确判定，这里没跟上。
+        #
+        #   修法：用显式名单。名单外的字段【不猜】—— 走下面的保守分支。
         items = []
         for k, v in ti.items():
             field = "input." + str(k)
             name = str(k).lower()
-            if "content" in name or "text" in name or "body" in name:
-                items.append((field, str(v), content_rules))
-            else:
+            if name in MCP_CMD_FIELDS:
+                # 只对【已知会执行】的字段套命令规则。
                 items.append((field, str(v), cmd_rules))
+            else:
+                # 已知内容字段 + 【名单外字段】→ 都只过 content_rules。
+                #
+                # ⚠️ 为什么名单外字段【不】套 cmd_rules（取舍说明）：
+                #    本项目 README 明写「失败策略是 FAIL-OPEN —— 宁可漏拦，
+                #    不可把用户会话卡死」。字段名判不出语义时，两个方向的
+                #    代价并不对等：
+                #
+                #      误拦（套 cmd）：写一句「分析一下 pkill 为什么危险」
+                #                    放进 prompt → 被拦 → 一次完整往返。
+                #                    实测坐实（本机 mcp__scheduled-tasks__*）。
+                #      漏拦（不套 cmd）：名单外字段里的危险串不会被拦。
+                #                    代价取决于那个字段会不会被执行。
+                #
+                #    实测依据（不是推断）：本机【当前可达】的 3 个 MCP 工具
+                #    （mcp__scheduled-tasks__*）的全部字段是
+                #    taskId / prompt / description / cronExpression / fireAt
+                #    / enabled / notifyOnCompletion —— 语义是 ID / 文本 /
+                #    时间 / 布尔，没有一个承载 shell 命令。
+                #
+                #    ⚠️ 这条证据只覆盖【当前可达】的工具。它【不证明】
+                #    "文本字段永远不会被执行"（那取决于各 server 的实现，
+                #    不在本门可观测范围）。所以：
+                #      若将来装了 filesystem / shell / 数据库类 MCP server，
+                #      且其命令字段名不在 MCP_CMD_FIELDS 里 → 会漏拦。
+                #    这是刻意取舍，与「门是防误操作层，不是安全边界」一致。
+                #    见 install.md 的「已知边界」。
+                items.append((field, str(v), content_rules))
         targets = items
     elif tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
         # 只对内容做损害性检查；路径单独只看是否指向敏感位置

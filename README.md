@@ -129,7 +129,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **265 项**全过）：
+跑测试（预期 **291 项**全过）：
 
 ```bash
 python tests/four_gate_selftest.py        # 53/53
@@ -142,7 +142,8 @@ python tests/g5_real_regression_test.py   # 25/25  ← 真实会话挖出的用�
 python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
 python tests/gate_events_test.py          # 30/30  ← Gate 事件记录
 python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
-python tests/install_cli_test.py          # 11/11  ← 安装参数回归
+python tests/install_cli_test.py          # 12/12  ← 安装参数回归
+python tests/mcp_field_dispatch_test.py   # 26/26  ← MCP 字段分派
 ```
 
 > **synthetic 与 REAL 分开** —— `tests/` 里前六套是按规则构造的用例（写法理想）；
@@ -253,7 +254,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（52 项真实问题）
+├─ CHANGELOG.md                    变更记录（53 项真实问题）
 ├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
@@ -262,7 +263,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十一套测试（265 项，含真实回归）
+└─ tests/                          十二套测试（291 项，含真实回归）
 ```
 
 ---
