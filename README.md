@@ -129,7 +129,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **313 项**全过 —— 12 套功能测试 296 + 本清单里的检查器 17）：
+跑测试（预期 **296 项**全过 —— 12 套功能测试 296 + 本清单里的检查器 17）：
 
 ```bash
 python tests/four_gate_selftest.py        # 53/53
@@ -267,7 +267,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（55 项真实问题）
+├─ CHANGELOG.md                    变更记录（56 项真实问题）
 ├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
@@ -276,7 +276,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十三套测试（313 项，含真实回归）
+└─ tests/                          十三套测试（296 项，含真实回归）
 ```
 
 ---

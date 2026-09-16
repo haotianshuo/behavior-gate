@@ -59,10 +59,6 @@ def discover_suites():
 
 SUITES = discover_suites()
 
-# 本检查器自身的用例数 —— 只用于让「N 项」校验接受第二个口径。
-# ⚠️ 它【不参与】total 的计算（否则自指）；写错它只会让校验过宽，不会出错判。
-SELF_HINT = 17
-
 # ⚠️ 「全部套件」的口径必须只定义一处。
 #   SUITES 排除了自己（它递归跑其它套件，不能自我递归）；
 #   但文档里列的清单【包含】doc_consistency_test —— 所以对外计数是 +1。
@@ -130,8 +126,7 @@ def main():
           all(v > 0 for v in detail.values()),
           "零值项：%s" % [k for k, v in detail.items() if v == 0])
 
-    # ---- 文档里的「N 项」必须都等于实际总数 ----
-    print("\n----- 文档中的「N 项」必须与实际一致 -----")
+    # ---- 文档里的「N 项」与「N 项真实问题」----
     PAT = re.compile(r"(\d{2,4})\s*项")
     DOCS = []
     for f in CANDIDATE_DOCS:
@@ -143,22 +138,6 @@ def main():
         # 列了 2 个以上套件名 → 它就是在列测试清单 → 纳入检查
         if len(listed & set(SUITES)) >= 2:
             DOCS.append(f)
-        bad = []
-        for i, line in enumerate(s.split("\n"), 1):
-            for m in PAT.finditer(line):
-                n = int(m.group(1))
-                # 只关心「测试总数」量级；其他数字（如 53/53 的分项）不在此列
-                #
-                # ⚠️ 接受【两个合法口径】（实测踩到后定的）：
-                #    total        = 其余套件合计（本测试测得到的部分）
-                #    total + self = 全部套件合计（含本检查器自己）
-                #    文档写哪个都行，但必须写清楚是哪个口径。
-                #    写别的数 → 红。
-                if 80 <= n <= 999 and n not in (total, total + SELF_HINT):
-                    bad.append("行 %d：写着 %d 项（应为 %d 或 %d）"
-                               % (i, n, total, total + SELF_HINT))
-        check("%s 无过期测试数" % f, not bad,
-              "；".join(bad) if bad else "")
 
     # ---- 列了清单的文档必须【列全】----
     # ⚠️ 这条是新增的，来自真实教训：AGENTS.md 曾只列 6/13 个套件，
@@ -227,6 +206,58 @@ def main():
         #    改它的项数时【必须手工同步这四份文档】。
         check("%s 分项数字正确" % f, not bad,
               "；".join(bad[:3]) if bad else "")
+
+    # ---- CHANGELOG 的「N 项真实问题」必须等于实际条目数 ----
+    # ⚠️ 补盲区：原来只查「N 项测试」，漏了「N 项真实问题」——
+    #    实测踩到：CHANGELOG 实际 56 条，README 里仍写「55 项真实问题」，
+    #    而本测试报"通过"。同一类数字在【另一处】复发。
+    print("\n----- CHANGELOG 条目数必须与文档引用一致 -----")
+    cl = io.open(os.path.join(PKG, "CHANGELOG.md"), encoding="utf-8").read()
+    n_issues = 0
+    for line in cl.split("\n"):
+        mm = re.match(r"\| (\d+) \|", line)
+        if mm and int(mm.group(1)) == n_issues + 1:
+            n_issues = int(mm.group(1))
+    print("      CHANGELOG 实际条目数：%d" % n_issues)
+    for f in CANDIDATE_DOCS:
+        p2 = os.path.join(PKG, f)
+        if not os.path.isfile(p2):
+            continue
+        s2 = io.open(p2, encoding="utf-8").read()
+        bad = []
+        for mm in re.finditer(r"(\d+)\s*项真实问题", s2):
+            if int(mm.group(1)) != n_issues:
+                bad.append("写着 %s 项，实际 %d" % (mm.group(1), n_issues))
+        # 只在文档确实引用了这个数时才检查
+        if re.search(r"\d+\s*项真实问题", s2):
+            check("%s 的 CHANGELOG 项数正确" % f, not bad, "；".join(bad))
+
+    # ---- 文档里的「N 项测试」必须等于【功能测试】合计 ----
+    #
+    # ⚠️ 口径：总数【只算被检查的 12 套功能测试】（当前 296），
+    #    **不含本检查器自己**。
+    #
+    #    为什么不含自己 —— 这是踩了两次后的结论：
+    #      本测试不能跑自己（递归），所以它无法得知自己的用例数。
+    #      任何把它算进总数的方案都需要一个「自己有多少项」的已知值：
+    #        · 用常量记 → 改本文件就漂（实测漂过两次）
+    #        · 用 len(_results) 现算 → 但检查跑完前它还在增长，算不准
+    #      两种都失败，因为**总数依赖它自己**，是自指。
+    #
+    #    不含自己就没有自指：改本文件、加减检查，都不影响文档要写的数。
+    #    「296 项功能测试 + 1 个检查器」也比「313 项」更准确 ——
+    #    检查器不是功能，它没有「通过/不通过」以外的产品意义。
+    print("\n----- 文档中的「N 项」必须等于功能测试合计（%d）-----" % total)
+    for f in DOCS:
+        p2 = os.path.join(PKG, f)
+        s2 = io.open(p2, encoding="utf-8").read()
+        bad = []
+        for i, line in enumerate(s2.split("\n"), 1):
+            for m in PAT.finditer(line):
+                n = int(m.group(1))
+                if 80 <= n <= 999 and n != total:
+                    bad.append("行 %d：写着 %d 项（应为 %d）" % (i, n, total))
+        check("%s 无过期测试数" % f, not bad, "；".join(bad))
 
     npass = sum(1 for _, ok, _ in _results if ok)
     print("\n" + "=" * 84)

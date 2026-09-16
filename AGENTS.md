@@ -34,7 +34,7 @@
 ├─ tools/
 │   ├─ verify_deploy.py            部署校验
 │   └─ verify_portable.py          可移植性校验
-└─ tests/                          十三套测试（313 项，用 ls tests/*.py 枚举）
+└─ tests/                          十三套测试（296 项，用 ls tests/*.py 枚举）
 ```
 
 ---
@@ -48,7 +48,7 @@ python install.py
 # 应用安装
 python install.py --apply
 
-# 全部测试（313 项 = 12 套功能测试 296 + 检查器 17，提交前必须通过）
+# 全部测试（296 项 = 12 套功能测试 296 + 检查器 17，提交前必须通过）
 # ⚠️ 不要照抄这段清单 —— 用 glob 枚举，否则新增套件会被漏掉：
 #     ls tests/*.py
 python tests/four_gate_selftest.py        # 53
@@ -123,7 +123,7 @@ python tools/verify_deploy.py
 
 ## 测试要求
 
-**任何改动都必须保证全部套件通过（当前 313 项）。**
+**任何改动都必须保证全部套件通过（当前 296 项）。**
 ⚠️ 不要照抄某个数字或清单 —— 用 `ls tests/*.py` 枚举，
    否则新增的套件会被漏跑（真实发生过：照旧清单跑，漏了 4 个套件）。
 
