@@ -17,7 +17,7 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **265 项**）：
+提交前必须全部通过（共 **293 项**）：
 
 ```bash
 python tests/four_gate_selftest.py        # 53/53
@@ -30,7 +30,9 @@ python tests/g5_real_regression_test.py   # 25/25  ← 真实会话用例
 python tests/source_identity_consistency_test.py  # 13/13
 python tests/gate_events_test.py          # 30/30
 python tests/g5_windows_path_test.py      # 18/18
-python tests/install_cli_test.py          # 11/11
+python tests/install_cli_test.py          # 12/12
+python tests/mcp_field_dispatch_test.py   # 27/27
+python tests/doc_consistency_test.py      # 9/9
 ```
 
 ### 改了 hooks 之后

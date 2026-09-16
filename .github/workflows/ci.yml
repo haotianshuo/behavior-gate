@@ -63,6 +63,9 @@ jobs:
       - name: MCP 字段分派
         run: python tests/mcp_field_dispatch_test.py
 
+      - name: 文档数字一致性
+        run: python tests/doc_consistency_test.py
+
       - name: 版本一致性
         run: python .github/scripts/check_version_consistency.py
 
