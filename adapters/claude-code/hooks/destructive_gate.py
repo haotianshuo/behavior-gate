@@ -118,16 +118,28 @@ CMD_DENY = [
         "id": "rm_rf_windows_drive",
         # 3.5.10 修复（#48）：与 rm_rf_traversal 共用选项解析片段。
         # 修前同样漏 `rm -r -f D:/` 与 `rm -Rf D:/`。
+        #
+        # 3.5.10 修复（#51）：第三分支补尾锚定。
+        #   修前：`[A-Za-z]:[\\/](Users|Windows|Program)` 无收尾 ——
+        #         于是 `C:/Users/me/任意/更深/路径` 全被当成「删用户目录」。
+        #   实测（另一台复核报的，本机复现）：4 个用例误报 ——
+        #         C:/Users/me/proj/node_modules、.cache/pip、
+        #         AppData/Local/Temp/b、Downloads/tmp 全部被拦。
+        #   而这条规则的注释【自己写着】「更深的项目路径不拦」——
+        #   注释与实际不符，这正是本项目反复出现的形状。
+        #   修法：补上结尾锚定，只在目标是 profile 根本身时才拦。
         "pattern": r"\brm\s+" + _RM_OPTS +
                    r"([A-Za-z]:[\\/]?(\s|$|\*)|"
                    r"[A-Za-z]:[\\/][^\\/\s]+[\\/]?\s*$|"
-                   r"[A-Za-z]:[\\/](Users|Windows|Program))",
+                   r"[A-Za-z]:[\\/](Users|Windows|Program)"
+                   r"([\\/][^\\/\s]+)?[\\/]?" + _RM_ROOT_TAIL + r")",
         "why": "递归强删 Windows 盘符根、盘符下第一层目录、或系统目录。\n"
                "  实测：`rm -rf D:/` 与 `rm -rf C:/Users/<用户>` 此前全部放行 ——\n"
                "  规则只认 POSIX 根路径，在本机（Windows 11）等于没有保护。\n"
-               "  取舍：只拦到【盘符 + 第一层】（D:/important）。\n"
-               "  D:/myproj/build 这类更深的项目路径不拦 —— 那是常规清理，\n"
-               "  机械规则区分不了「重要目录」与「项目内构建目录」。",
+               "  取舍：只拦到【盘符 + 第一层】（D:/important），\n"
+               "  以及系统目录（C:/Users、C:/Users/<用户>、C:/Windows）。\n"
+               "  D:/myproj/build、C:/Users/me/proj/node_modules 这类更深的路径不拦\n"
+               "  —— 那是常规清理，机械规则区分不了「重要目录」与「项目内构建目录」。",
         "instead": "写出完整的具体路径（如 D:/myproj/build），并先 `ls` 确认目标。",
     },
     {

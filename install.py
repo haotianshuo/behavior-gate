@@ -73,6 +73,38 @@ SRC_POLICY = os.path.join(HERE, "policy", "behavior-policy.json")
 APPLY = "--apply" in sys.argv
 FORCE = "--force" in sys.argv
 
+# 本安装器认识的参数（含无值的开关）。
+# ⚠️ 这张表必须与下面 parse_args 的实际读取保持一致 ——
+#    它是「未知参数报错」的判据来源。
+KNOWN_FLAGS = {
+    "--apply", "--force", "--rollback", "--write-manifest",
+    "--scope", "--project", "--global", "--help", "-h",
+}
+
+
+def check_unknown_flags(argv):
+    """拦下不认识的参数 —— 不要静默忽略。
+
+    为什么必须有这个（实测坐实的缺陷）：
+        README 里写的是 `python install.py --apply --global`，
+        而实现只读 `--scope global`。`--global` 从来没被解析过 ——
+        arg_value 找不到就返回默认值，于是【静默降级成项目级】，
+        而且因为 --project 默认取当前目录，会装进【包自己所在的目录】。
+
+        用户以为装到全局了，重启后门完全不生效，且没有任何提示。
+        这是「照着文档做反而做错」那一类。
+
+    静默忽略未知参数是根因 —— 不只是 --global 一个参数的问题。
+    报错而不是忽略，以后再加参数时不会再重演同一个形状。
+
+    返回：错误信息列表（空 = 没有未知参数）
+    """
+    bad = []
+    for a in argv:
+        if a.startswith("-") and a not in KNOWN_FLAGS:
+            bad.append(a)
+    return bad
+
 
 def arg_value(flag, default=None):
     if flag in sys.argv:
@@ -88,7 +120,13 @@ def echo(*a):
 
 def resolve_scope():
     """返回 (scope, claude_dir, settings_path, hooks_dir, label)"""
-    scope = (arg_value("--scope", "project") or "project").lower()
+    # `--global` 是 `--scope global` 的别名。
+    # README 曾经只写 `--global`（另两份文档写 `--scope global`）——
+    # 让两种写法都能工作，是为了不辜负已经照旧文档做过的人。
+    if "--global" in sys.argv:
+        scope = "global"
+    else:
+        scope = (arg_value("--scope", "project") or "project").lower()
 
     if scope == "global":
         d = os.path.join(HOME, ".claude")
@@ -277,6 +315,28 @@ def _owned_paths(claude_dir):
 
 
 def main():
+    # 未知参数【报错】而不是静默忽略 —— 见 check_unknown_flags 的注释。
+    # 放在最前面：宁可不安，也不要在"装错地方"之后才告诉用户。
+    unknown = check_unknown_flags(sys.argv[1:])
+    if unknown:
+        echo("=" * 64)
+        echo("[!] 有无法识别的参数：%s" % " ".join(unknown))
+        echo("=" * 64)
+        echo("")
+        echo("  本安装器认识的参数：")
+        echo("    --apply              真正写入（不加则只预演）")
+        echo("    --scope global       安装到全局（~/.claude/）")
+        echo("    --scope project      安装到当前项目（默认）")
+        echo("    --project <路径>     指定项目目录")
+        echo("    --global             --scope global 的别名")
+        echo("    --force              以源码为准覆盖部署")
+        echo("    --rollback           回滚")
+        echo("")
+        echo("  刻意不忽略未知参数：以前 `--global` 就是被静默忽略的，")
+        echo("  结果照文档执行却装进了包自己所在的目录，且没有任何提示。")
+        echo("")
+        return 2
+
     scope, claude_dir, settings, hooks_dst, label = resolve_scope()
 
     echo("=" * 64)

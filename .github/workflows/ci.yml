@@ -54,6 +54,12 @@ jobs:
       - name: Gate 事件记录
         run: python tests/gate_events_test.py
 
+      - name: G5 Windows 路径回归
+        run: python tests/g5_windows_path_test.py
+
+      - name: 安装参数回归
+        run: python tests/install_cli_test.py
+
       - name: 版本一致性
         run: python .github/scripts/check_version_consistency.py
 

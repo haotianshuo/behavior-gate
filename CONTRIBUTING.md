@@ -17,7 +17,7 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **236 项**）：
+提交前必须全部通过（共 **265 项**）：
 
 ```bash
 python tests/four_gate_selftest.py        # 53/53
@@ -29,6 +29,8 @@ python tests/upgrade_path_test.py         # 19/19
 python tests/g5_real_regression_test.py   # 25/25  ← 真实会话用例
 python tests/source_identity_consistency_test.py  # 13/13
 python tests/gate_events_test.py          # 30/30
+python tests/g5_windows_path_test.py      # 18/18
+python tests/install_cli_test.py          # 11/11
 ```
 
 ### 改了 hooks 之后
@@ -122,7 +124,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 236 项测试全部通过
+[ ] 265 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 已在 CHANGELOG.md 添加条目

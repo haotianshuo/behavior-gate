@@ -36,6 +36,10 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
+# 安装产物（跑 install.py 会生成；测试若未隔离也会留下）
+# 它不属于源码 —— 不该进仓库，也不该出现在 git status 里
+.claude/
+
 # 本地配置与备份
 .env
 .env.local
