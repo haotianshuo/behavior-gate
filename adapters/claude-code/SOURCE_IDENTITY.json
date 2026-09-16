@@ -1,6 +1,6 @@
 {
   "algorithm": "sha256-sorted-managed-v1",
   "schemaVersion": "wuq-source-identity-v1",
-  "snapshot": "1fa7658ea6372d3ff20c0e0fd2fb03b3b210fb84641c41ca4a141a744b527a03",
-  "version": "3.5.11"
+  "snapshot": "4d0d355aebd60a50d9155a82a7a3ebc0ad9f4be4655cc3ad3e906ca17e7fe45e",
+  "version": "3.5.12"
 }
