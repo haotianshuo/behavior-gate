@@ -33,6 +33,7 @@
 | 3.5.10 | G5 `rm_rf_windows_drive` 第三分支无锚定 → 用户目录下的深层路径全被误拦（#51）|
 | 3.5.10 | `install.py` 静默忽略未知参数 → README 的 `--global` 从未生效，静默装错位置（#52）|
 | 3.5.10 | MCP 字段分类用裸子串 → `context` 漏拦 + `prompt` 过拦；改为显式名单（#53）|
+| 3.5.11 | **发布修复**：v3.5.10 的 tag 与 Release zip 停在 fce1e2d，不含 #51–#53；补发 v3.5.11 |
 
 > 从 3.1.0 起版本号由 `adapters/claude-code/hooks/VERSION` 声明，随 hooks 一起部署与校验。
 > **改了 hook 内容就必须同时改 VERSION** —— 否则升级会被自己的漂移检查拦下（这是设计意图）。
