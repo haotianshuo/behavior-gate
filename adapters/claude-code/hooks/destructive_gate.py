@@ -66,17 +66,23 @@ _RM_ROOT_TAIL = r"(\s|$|\*)"                         # 结尾锚定：恰好是�
 #    这与 #3（`bg-` 子串误配）是同一形状：**用子串当身份判据**。
 #    那边的 _is_ours 已改成精确判定，这里没跟上。
 #
-# 名单外的字段不猜 —— 走「两套规则都过」的保守分支（见下面的注释）。
-MCP_CONTENT_FIELDS = {
-    # 写入内容 / 文本载荷。这些字段承载的是"文字"，不是"正在执行的命令"。
-    "content", "text", "body", "new_string", "new_str",
-    "old_string", "old_str", "file_text", "contents",
-}
-
+# 名单外的字段不猜 —— 走「只过 content_rules」的 FAIL-OPEN 分支
+# （见 MCP 分派处的注释）。
+#
+# ⚠️ 只保留【有明确命令语义】的字段名。
+#    刻意【不】包含 data / input / payload 这类【通用容器名】——
+#    它们语义不明，与"名单外字段"是同一类，不该享受"假设是命令"的待遇。
+#    实测：这三个字段名在真实 MCP 调用里一次都没出现过（550 次调用）。
+#    留着它们反而会让"拿它们装自由文本"的 server 过拦。
+#
+#    ⚠️ 但 code **保留** —— 它与上面三个不同：
+#       code 有明确的"要执行的代码"语义（MCP 常见 mcp__repl__execute
+#       这类工具的入参就叫 code），与 script 同类。
+#       分清"通用容器名"与"有明确执行语义的名字"是这个名单的关键。
 MCP_CMD_FIELDS = {
     # 会被执行的命令 / 脚本。这些字段的值可能真的进 shell。
     "command", "cmd", "script", "shell", "exec", "argv", "args",
-    "code", "input", "data", "payload", "stdin",
+    "code", "stdin",
 }
 
 

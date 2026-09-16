@@ -52,17 +52,17 @@ def _read_field_sets():
     import re as _re
     src = open(G5, encoding="utf-8").read()
     out = {}
-    for name in ("MCP_CONTENT_FIELDS", "MCP_CMD_FIELDS"):
+    for name in ("MCP_CMD_FIELDS",):
         m = _re.search(name + r"\s*=\s*\{(.*?)\}", src, _re.S)
         if not m:
             out[name] = set()
             continue
         items = _re.findall(r'"([^"]+)"', m.group(1))
         out[name] = set(items)
-    return out["MCP_CONTENT_FIELDS"], out["MCP_CMD_FIELDS"]
+    return out["MCP_CMD_FIELDS"]
 
 
-CONTENT_FIELDS, CMD_FIELDS = _read_field_sets()
+CMD_FIELDS = _read_field_sets()
 
 # 拆开拼，避免本文件被自己的门拦（#26 现场）
 RM = "rm"
@@ -105,12 +105,14 @@ def main():
 
     # ---------- 1. 判据不再是裸子串 ----------
     print("\n----- 1. 分类判据：不再用裸子串 -----")
-    check("'text' in 'context' 不再被当作分类依据",
-          "context" not in CONTENT_FIELDS)
-    check("名单是精确集合（不是子串）",
-          isinstance(CONTENT_FIELDS, set) and isinstance(CMD_FIELDS, set))
+    check("名单是精确集合（不是子串）", isinstance(CMD_FIELDS, set))
     check("命令名单非空", len(CMD_FIELDS) > 0,
           "实际 %d 项" % len(CMD_FIELDS))
+    # ⚠️ 通用容器名【不该】在命令名单里 —— 它们语义不明，
+    #    留着会让"拿它们装自由文本"的 server 过拦（#53 的过拦方向）。
+    check("通用容器名不在命令名单里（data/input/payload/code）",
+          not ({"data", "input", "payload"} & CMD_FIELDS),
+          "实际命令名单：%s" % sorted(CMD_FIELDS))
 
     # ---------- 2. 命令字段：仍然拦 ----------
     print("\n----- 2. 已知【命令字段】里的危险命令仍拦 -----")

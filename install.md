@@ -8,7 +8,7 @@
 > 当前实测：四关 53/53、安装链路 21/21、对抗 24/24、预算安全 30/30、
 > 　　　　　意图门 21/21、升级路径 19/19、G5 真实回归 25/25、
 > 　　　　　源身份一致性 13/13、Gate 事件 30/30、Windows 路径 18/18、
-> 　　　　　安装参数 11/11（=265 项）
+> 　　　　　安装参数 12/12、MCP 字段分派 27/27（=292 项）
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -64,10 +64,11 @@ python tests/g5_real_regression_test.py   # 期望 25/25  ← 真实会话用例
 python tests/source_identity_consistency_test.py  # 期望 13/13
 python tests/gate_events_test.py          # 期望 30/30
 python tests/g5_windows_path_test.py      # 期望 18/18
-python tests/install_cli_test.py          # 期望 11/11
+python tests/install_cli_test.py          # 期望 12/12
+python tests/mcp_field_dispatch_test.py   # 期望 27/27
 ```
 
-**合计 265 项。** 也可以一次跑完：
+**合计 292 项。** 也可以一次跑完：
 
 ```bash
 python tools/verify_portable.py       # 可移植性校验
@@ -167,6 +168,8 @@ MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd �
 
 ```text
 已知命令字段（command / cmd / script / shell / exec / argv / args / code / stdin）
+    —— 只收【有明确命令语义】的名字，不含 data / input / payload
+       这类通用容器名（它们语义不明，与"名单外字段"同类）
     → 只过 cmd 规则
 其他所有字段（含名单外的）
     → 只过 content 规则
@@ -207,7 +210,7 @@ MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd �
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          十一套测试（=265 项）
+└─ tests/                          十二套测试（=292 项）
 ```
 
 ### 五道门
