@@ -7,8 +7,8 @@
 > `判定: MATCH` / `自检通过` / `证据：L3` 都**不等于**内容已被核实。
 > 当前实测：四关 53/53、安装链路 21/21、对抗 24/24、预算安全 30/30、
 > 　　　　　意图门 21/21、升级路径 19/19、G5 真实回归 25/25、
-> 　　　　　源身份一致性 13/13、Gate 事件 30/30、Windows 路径 18/18、
-> 　　　　　安装参数 12/12、MCP 字段分派 27/27（=293 项）
+> 　　　　　源身份一致性 13/13、Gate 事件 33/33、Windows 路径 18/18、
+> 　　　　　安装参数 12/12、MCP 字段分派 27/27（=296 项）
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -62,14 +62,14 @@ python tests/intent_gate_test.py          # 期望 21/21
 python tests/upgrade_path_test.py         # 期望 19/19
 python tests/g5_real_regression_test.py   # 期望 25/25  ← 真实会话用例
 python tests/source_identity_consistency_test.py  # 期望 13/13
-python tests/gate_events_test.py          # 期望 30/30
+python tests/gate_events_test.py          # 期望 33/33
 python tests/g5_windows_path_test.py      # 期望 18/18
 python tests/install_cli_test.py          # 期望 12/12
 python tests/mcp_field_dispatch_test.py   # 期望 27/27
-python tests/doc_consistency_test.py      # 期望 9/9
+python tests/doc_consistency_test.py      # 期望 17/17
 ```
 
-**合计 293 项。** 也可以一次跑完：
+**合计 296 项。** 也可以一次跑完：
 
 ```bash
 python tools/verify_portable.py       # 可移植性校验
@@ -211,7 +211,7 @@ MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd �
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          十二套测试（=293 项）
+└─ tests/                          十三套测试（=296 项）
 ```
 
 ### 五道门

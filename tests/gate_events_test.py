@@ -230,6 +230,35 @@ def main():
     check("记录失败时 G5 仍 deny（rc=2）", p.returncode == 2, "rc=%d" % p.returncode)
     check("记录失败不抛异常", "Traceback" not in out)
 
+    # ---------- 11. 记录不阻塞判定（#54）----------
+    # ⚠️ 实测缺陷（外部复核发现，本机坐实）：
+    #    record_gate_event 原用 _Lock 的默认 timeout=3.0s，
+    #    而它在 deny() 里于【决策 JSON 发出之前】调用 ——
+    #    于是锁被占时，一次本应立即生效的 deny 会等满 3 秒。
+    #    实测：人为持锁时 deny 耗时 3.09s（无竞争 86ms）。
+    #    修法：0.05s 非阻塞 —— 拿不到就丢事件。
+    print("\n----- 11. 记录不阻塞判定（锁被占时仍要快）-----")
+    import time
+    d11 = tempfile.mkdtemp(prefix="gev11-")
+    # 人为占住事件锁
+    os.makedirs(os.path.join(d11, "gate-events.jsonl.lock"), exist_ok=True)
+    env11 = {**os.environ, "PYTHONIOENCODING": "utf-8",
+             "CLAUDE_BUDGET_STATE_DIR": d11}
+    t0 = time.time()
+    p11 = subprocess.run(
+        [sys.executable, os.path.join(HOOKS, "destructive_gate.py")],
+        input=json.dumps(bash_payload(RM + " " + R + " /", "s11b")).encode("utf-8"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env11, timeout=30)
+    el = time.time() - t0
+    check("锁被占时 deny 不等待（< 1 秒）", el < 1.0,
+          "实际 %.2f 秒（修前是 3.09 秒）" % el)
+    check("锁被占时判定不变（rc=2）", p11.returncode == 2,
+          "rc=%d" % p11.returncode)
+    # 拿不到锁 → 该事件被丢弃（这是设计：观测不值得让门等）
+    n11 = len(events(d11))
+    check("拿不到锁 → 丢事件（不阻塞、不报错）", n11 == 0,
+          "事件数 %d（期望 0 —— 锁被占时丢事件是有意的）" % n11)
+
     # ---------- 汇总 ----------
     npass = sum(1 for _, ok, _ in _results if ok)
     print("\n" + "=" * 88)

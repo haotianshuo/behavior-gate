@@ -129,7 +129,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **293 项**全过）：
+跑测试（预期 **296 项**全过）：
 
 ```bash
 python tests/four_gate_selftest.py        # 53/53
@@ -140,11 +140,11 @@ python tests/intent_gate_test.py          # 21/21
 python tests/upgrade_path_test.py         # 19/19
 python tests/g5_real_regression_test.py   # 25/25  ← 真实会话挖出的用例
 python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
-python tests/gate_events_test.py          # 30/30  ← Gate 事件记录
+python tests/gate_events_test.py          # 33/33  ← Gate 事件记录
 python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
 python tests/install_cli_test.py          # 12/12  ← 安装参数回归
 python tests/mcp_field_dispatch_test.py   # 27/27  ← MCP 字段分派
-python tests/doc_consistency_test.py      # 9/9    ← 文档数字一致性
+python tests/doc_consistency_test.py      # 17/17  ← 文档数字一致性
 ```
 
 > **synthetic 与 REAL 分开** —— `tests/` 里前六套是按规则构造的用例（写法理想）；
@@ -183,7 +183,19 @@ python tests/doc_consistency_test.py      # 9/9    ← 文档数字一致性
 > 有写权限的人可以改它。它不是安全审计系统 —— 需要那种能力请用操作系统级沙箱。
 
 **记录失败绝不改变门的判定**：写不进日志时，门照常执行原来的 deny / allow。
-观测层永远不会成为门的故障点。
+观测层永远不会成为门的故障点 —— 也**不会让门等待**：
+记录用 0.05 秒的非阻塞锁，拿不到就直接丢这条事件。
+（实测：修前锁被占时一次 deny 要等 3.09 秒；修后 0.14 秒）
+
+> ⚠️ **想让数据活得久，请设 `CLAUDE_BUDGET_STATE_DIR`。**
+> 默认位置在系统临时目录（`%TEMP%` / `/tmp`）——
+> 那是**会被系统清理**的地方，而观测数据的价值恰恰在「攒」。
+> 想长期统计就指到非临时路径：
+
+```bash
+set CLAUDE_BUDGET_STATE_DIR=D:\claude-gate-data      # Windows
+export CLAUDE_BUDGET_STATE_DIR=~/.claude-gate-data   # macOS / Linux
+```
 
 ---
 
@@ -264,7 +276,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十二套测试（293 项，含真实回归）
+└─ tests/                          十三套测试（296 项，含真实回归）
 ```
 
 ---

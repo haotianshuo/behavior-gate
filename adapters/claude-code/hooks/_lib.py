@@ -258,10 +258,24 @@ def record_gate_event(gate_id, rule_id, decision, tool=None,
         except Exception:
             return False
 
-        lock = _Lock(path + ".lock")
+        # ⚠️ timeout 必须极短 —— 观测【不该让门等】。
+        #
+        #    实测缺陷（外部复核发现，本机坐实）：
+        #    这里原用 _Lock 的默认 timeout=3.0s。而 record_gate_event 是在
+        #    deny() 里于【决策 JSON 发出之前】调用的 —— 于是锁被占时，
+        #    一次本应立即生效的 deny 会等满 3 秒。
+        #    实测：人为持锁时 deny 耗时 3.09s（无竞争时 86ms）。
+        #
+        #    原注释写着「拿不到锁就不记 —— 但绝不阻塞判定」，
+        #    而实现用的是默认超时 —— 注释与实现不符（本项目的老毛病）。
+        #
+        #    修法：0.05s —— 拿不到就丢这条事件。
+        #    观测数据的价值远低于「门立即生效」；丢一条事件是可接受的，
+        #    延迟一次 deny 不是。
+        lock = _Lock(path + ".lock", timeout=0.05)
         with lock:
             if not lock.held:
-                return False        # 拿不到锁就不记 —— 但绝不阻塞判定
+                return False        # 拿不到锁就丢事件，绝不阻塞判定
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line)
         return True

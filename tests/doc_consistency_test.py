@@ -59,6 +59,12 @@ def discover_suites():
 
 SUITES = discover_suites()
 
+# ⚠️ 「全部套件」的口径必须只定义一处。
+#   SUITES 排除了自己（它递归跑其它套件，不能自我递归）；
+#   但文档里列的清单【包含】doc_consistency_test —— 所以对外计数是 +1。
+#   实测踩到：标题用 len(SUITES)=12、正文用 13，两处口径打架。
+TOTAL_SUITES = len(SUITES) + 1
+
 # 哪些文档【应当】列全测试清单。
 # 判据：文档里出现了 2 个以上套件名 → 它就是在列清单 → 必须列全。
 # AGENTS.md 也在内（它是给 AI 读的，漏列会导致 AI 漏跑）。
@@ -135,7 +141,7 @@ def main():
     # ---- 列了清单的文档必须【列全】----
     # ⚠️ 这条是新增的，来自真实教训：AGENTS.md 曾只列 6/13 个套件，
     #    而它是给 AI 读的 —— AI 照着跑就漏掉一半，然后报"全过"。
-    print("\n----- 列了测试清单的文档必须列全（%d 套）-----" % len(SUITES))
+    print("\n----- 列了测试清单的文档必须列全（%d 套）-----" % TOTAL_SUITES)
     print("      （检查对象由「文档里出现 2 个以上套件名」自动判定）")
     for f in CANDIDATE_DOCS:
         p = os.path.join(PKG, f)
@@ -149,6 +155,32 @@ def main():
         miss = set(SUITES) - listed
         check("%s 列全了套件" % f, not miss,
               "缺 %d 个：%s" % (len(miss), ", ".join(sorted(miss))))
+
+    # ---- 「N 套测试」也必须等于实际套件数 ----
+    # ⚠️ 补这个盲区：原来只查「N 项」，漏了「N 套」。
+    #    实测踩到：README / install.md 写「十二套」，实际 13 个
+    #    （doc_consistency_test 自己没被算进去）。
+    print("\n----- 「N 套测试」必须等于实际套件数（%d）-----" % TOTAL_SUITES)
+    CN_NUM = {"十二": 12, "十三": 13, "十四": 14, "十五": 15,
+              "十六": 16, "十七": 17, "十八": 18, "十九": 19,
+              "二十": 20, "十一": 11, "十": 10}
+    SUITE_CNT = TOTAL_SUITES
+    for f in CANDIDATE_DOCS:
+        p = os.path.join(PKG, f)
+        if not os.path.isfile(p):
+            continue
+        s = io.open(p, encoding="utf-8").read()
+        bad = []
+        for m in re.finditer(r"([一二三四五六七八九十]+)套测试", s):
+            n = CN_NUM.get(m.group(1))
+            if n is not None and n != SUITE_CNT:
+                bad.append("「%s套测试」应为 %d 套" % (m.group(1), SUITE_CNT))
+        for m in re.finditer(r"\b(\d+)\s*套测试", s):
+            if int(m.group(1)) != SUITE_CNT:
+                bad.append("「%s 套测试」应为 %d 套"
+                           % (m.group(1), SUITE_CNT))
+        if bad:
+            check("%s 套件数正确" % f, False, "；".join(bad[:3]))
 
     # ---- 每套的分项数字也要对 ----
     print("\n----- 各套的分项数字（如 53/53）与实际一致 -----")
@@ -165,6 +197,12 @@ def main():
                 if int(m.group(2)) != n:
                     bad.append("%s 写成 %s（实际 %d）"
                                % (suite, m.group(0).split("/")[-1][:4], n))
+        # ⚠️ 已知盲区（如实声明，不假装能查）：
+        #    本测试【查不了自己】的分项数字 —— detail 基于 SUITES，
+        #    而 SUITES 刻意排除了自己（否则递归）。
+        #    实测踩到：四份文档都写着「doc_consistency_test # 9/9」，
+        #    而它已涨到 17 —— 没有任何自动检查发现。
+        #    改它的项数时【必须手工同步这四份文档】。
         check("%s 分项数字正确" % f, not bad,
               "；".join(bad[:3]) if bad else "")
 
