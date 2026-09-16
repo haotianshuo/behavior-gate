@@ -30,15 +30,40 @@ try:
 except Exception:
     pass
 
-SUITES = [
-    "four_gate_selftest", "cmd_chain_test", "adversarial_test",
-    "budget_safety_test", "intent_gate_test", "upgrade_path_test",
-    "g5_real_regression_test", "source_identity_consistency_test",
-    "gate_events_test", "g5_windows_path_test", "install_cli_test",
-    "mcp_field_dispatch_test",
-]
+def discover_suites():
+    """从磁盘枚举套件 —— **不写死清单**。
 
-DOCS = ["README.md", "install.md", "安装说明.md", "CONTRIBUTING.md"]
+    ⚠️ 这个函数的存在理由（来自另一台电脑复核的教训）：
+       它用 3.5.10 的清单去跑 3.5.11，报「236/236 全过」——
+       而 3.5.11 新增的 4 个套件【一个都没跑】。
+       写死清单 = 新增套件时不会自动进检查。
+
+       同一类问题还有一处：AGENTS.md 曾写着「全部测试（167 项）」，
+       只列 6 个套件 —— 而 AGENTS.md 是【给 AI 读的项目说明】，
+       AI 照着跑就会漏掉一半，然后报"全过"。
+       所以清单必须从磁盘派生，且每份列清单的文档都要被检查是否列全。
+
+    排除自己（doc_consistency_test）—— 它递归跑其它套件。
+    """
+    here = os.path.basename(__file__)[:-3]
+    out = []
+    for f in sorted(os.listdir(os.path.join(PKG, "tests"))):
+        if not f.endswith(".py") or f == "__init__.py":
+            continue
+        name = f[:-3]
+        if name == here:
+            continue
+        out.append(name)
+    return out
+
+
+SUITES = discover_suites()
+
+# 哪些文档【应当】列全测试清单。
+# 判据：文档里出现了 2 个以上套件名 → 它就是在列清单 → 必须列全。
+# AGENTS.md 也在内（它是给 AI 读的，漏列会导致 AI 漏跑）。
+CANDIDATE_DOCS = ["README.md", "install.md", "安装说明.md",
+                  "CONTRIBUTING.md", "AGENTS.md", ".github/workflows/ci.yml"]
 
 _results = []
 
@@ -87,12 +112,16 @@ def main():
     # ---- 文档里的「N 项」必须都等于实际总数 ----
     print("\n----- 文档中的「N 项」必须与实际一致 -----")
     PAT = re.compile(r"(\d{2,4})\s*项")
-    for f in DOCS:
+    DOCS = []
+    for f in CANDIDATE_DOCS:
         p = os.path.join(PKG, f)
         if not os.path.isfile(p):
-            check("%s 存在" % f, False, "文件缺失")
             continue
         s = io.open(p, encoding="utf-8").read()
+        listed = set(re.findall(r"([a-z_0-9]+_test|four_gate_selftest)", s))
+        # 列了 2 个以上套件名 → 它就是在列测试清单 → 纳入检查
+        if len(listed & set(SUITES)) >= 2:
+            DOCS.append(f)
         bad = []
         for i, line in enumerate(s.split("\n"), 1):
             for m in PAT.finditer(line):
@@ -102,6 +131,24 @@ def main():
                     bad.append("行 %d：写着 %d 项" % (i, n))
         check("%s 无过期测试数" % f, not bad,
               "；".join(bad) if bad else "")
+
+    # ---- 列了清单的文档必须【列全】----
+    # ⚠️ 这条是新增的，来自真实教训：AGENTS.md 曾只列 6/13 个套件，
+    #    而它是给 AI 读的 —— AI 照着跑就漏掉一半，然后报"全过"。
+    print("\n----- 列了测试清单的文档必须列全（%d 套）-----" % len(SUITES))
+    print("      （检查对象由「文档里出现 2 个以上套件名」自动判定）")
+    for f in CANDIDATE_DOCS:
+        p = os.path.join(PKG, f)
+        if not os.path.isfile(p):
+            continue
+        s = io.open(p, encoding="utf-8").read()
+        listed = set(re.findall(r"([a-z_0-9]+_test|four_gate_selftest)", s))
+        listed &= set(SUITES)
+        if len(listed) < 2:
+            continue                      # 不是清单，跳过
+        miss = set(SUITES) - listed
+        check("%s 列全了套件" % f, not miss,
+              "缺 %d 个：%s" % (len(miss), ", ".join(sorted(miss))))
 
     # ---- 每套的分项数字也要对 ----
     print("\n----- 各套的分项数字（如 53/53）与实际一致 -----")
