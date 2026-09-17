@@ -779,8 +779,23 @@ def _warn_if_stale(policy_path, raw):
 # 用户在 prompt 里显式声明预算的语法。
 # 刻意不锚定行首 —— 用户会说「这个任务 agent_spawns: 2 可以派」，
 # 预算声明夹在句子里是常态。锚行首会导致声明被静默忽略（实测踩过）。
+#
+# ⚠️ 也不能用 `\b` 做左边界（3.5.13 修，本机实测坐实）。
+#
+#    实测缺陷：
+#        'agent_spawns: 20'       -> 命中（前面无 CJK）
+#        '我 agent_spawns: 20'    -> 命中（有空格）
+#        '我agent_spawns: 20'     -> ★不命中（无空格）
+#
+#    根因：Python3 的 \w 含 CJK 字符，所以「我」和「a」之间
+#    【没有词边界】，\b 不成立 → 声明被静默丢弃 → 降级到 policy 默认值。
+#    用户用中文正常语序说话（"我给你 agent_spawns: 20" 不加空格）时，
+#    预算声明会被无声忽略，而门只会显示一个默认的 0。
+#
+#    修法：左边界用【否定前瞻】排除 ASCII 标识符字符，
+#    而不是用 \b —— 这样中文（即使紧贴）也算合法边界，英文变量名仍被排除。
 BUDGET_LINE = re.compile(
-    r"\b(agent_spawns|agent_depth)\s*[:=]\s*([0-9]+)",
+    r"(?<![A-Za-z0-9_])(agent_spawns|agent_depth)\s*[:=]\s*([0-9]+)",
     re.I)
 
 

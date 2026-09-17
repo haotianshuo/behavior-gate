@@ -192,18 +192,23 @@ def main():
             "  2. 确实需要并行 —— 停下来告诉用户「我需要 N 个子代理做 X，原因是 Y」，\n"
             "     由用户在 prompt 里写一行 `agent_spawns: N` 放行。\n"
             % (who, desc),
-            gate_id="G1", rule_id="spawn_budget_exceeded",
+            gate_id="G1", rule_id="spawn_forbidden_by_task",
             tool="Agent", session_id=data.get("session_id"),
         )
 
     if verdict == "DENY_EXHAUSTED":
         deny(
-            "【G1 预算门】Agent 预算已用尽（%d / %d）。\n"
+            "【G1 预算门】Agent 预算已用尽（已读 %d / 当前上限 %d）。\n"
             "  你想派：%s（%s）\n"
             "  超出预算的唯一合法动作：停下 → 报告 → 问。\n"
-            "  需要更多预算，请让用户在 prompt 里写 `agent_spawns: <更大的数>`。"
+            "  需要更多预算，请让用户在 prompt 里写 `agent_spawns: <更大的数>`。\n"
+            "\n"
+            "  ⚠️ 若「已读」大于「当前上限」，那不是超支 ——\n"
+            "     是本轮 prompt 把上限【调低】了，而已读次数【从不回退】\n"
+            "     （设计如此：计数只增，防止改写 prompt 刷额度）。\n"
+            "     要拿到新额度，让用户写一个【大于已读数】的值。"
             % (used, cap, who, desc),
-            gate_id="G1", rule_id="spawn_budget_exhausted",
+            gate_id="G1", rule_id="spawn_quota_exhausted",
             tool="Agent", session_id=data.get("session_id"),
         )
 

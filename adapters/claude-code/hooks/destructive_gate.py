@@ -181,13 +181,6 @@ CMD_DENY = [
                "  实测 `rm -rf $env:TEMP/x` 与 `rm -rf $TEMP/x` 此前放行。",
         "instead": "写出完整的具体路径，并先 `ls` 确认目标。",
     },
-    {
-        "id": "posix_tmp_on_windows",
-        "pattern": r"\b(find|ls|rm|cat|du|grep|chmod|chown)\b[^\n|;&]*\s/tmp(/|\s|$)",
-        "why": "Git Bash on Windows 下 /tmp 会解析到 C:\\tmp。\n"
-               "  审计实证：那条命令「把 C:\\tmp 全扫了一遍」。",
-        "instead": "用显式路径（$TEMP 或具体目录），不要依赖 POSIX 约定。",
-    },
 ]
 
 # ---- 只在【写入内容】里拦：必须是真能造成损害的模式 ----
@@ -232,6 +225,32 @@ WARN = [
         "id": "app_db_touch",
         "pattern": r"app/data/app\.db",
         "why": "可能触及正式数据库。审计实证：曾有 +13 行未预判的审计日志写入。",
+    },
+    {
+        # ⚠️ 3.5.13 由 DENY 降为 WARN（外部复核 + 本机实测坐实）。
+        #
+        #    原 DENY 的立论前提【已被证伪】：
+        #      why 原文：「Git Bash on Windows 下 /tmp 会解析到 C:\tmp」
+        #      实测 cygpath -w /tmp -> C:\Users\Zeng\AppData\Local\Temp
+        #      即 %TEMP%，不是 C:\tmp。佐证：mount 显示 usertemp 挂载；
+        #      写文件到 /tmp 落在 %TEMP%；规则命名的 7 个工具全是 MSYS 原生。
+        #
+        #    真实后果：生产拦截 21 次（含 10 次审计噪声），逐条读命令全是
+        #    「碰 %TEMP% 下自己的文件」（cat > /tmp/x.py、pytest > /tmp/out.txt），
+        #    零真实损害被避免，却持续拦掉只读检查。
+        #
+        #    但【确有】一个不同的真实危险：/tmp 在原生 Windows 语境下是
+        #    「盘符相对路径」（原生 Python realpath('/tmp') -> C:\tmp；
+        #    PowerShell GetFullPath('/tmp') -> C:\tmp），而触发词集全是
+        #    MSYS 工具，恰好盖不到。按本项目「机械规则区分不了就不拦」
+        #    的既定哲学（对照 rm_rf_windows_drive），降为可见警告。
+        "id": "posix_tmp_on_windows",
+        "pattern": r"\b(find|ls|rm|cat|du|grep|chmod|chown)\b[^\n|;&]*\s/tmp(/|\s|$)",
+        "why": "命令里出现了 POSIX 的 /tmp。\n"
+               "  在 Git Bash 下它指向 %TEMP%（不是 C:\\tmp，原注释已证伪）；\n"
+               "  但在【原生 Windows 程序】里会被解析成 <当前盘>:\\tmp ——\n"
+               "  若该命令最终由原生程序执行，可能碰错目录。\n"
+               "  实测本规则此前的拦截全部是误报，故降为警告而非阻断。",
     },
 ]
 
@@ -315,7 +334,18 @@ def main():
     #           MCP 写文件的 content 字段被 cmd 类规则拦（实测坐实）。
     #     现在改为逐字段 + 按字段语义分派规则。
     if tool == "Bash":
-        targets = [("command", ti.get("command") or "", cmd_rules)]
+        # ⚠️ 3.5.13：Bash 也过 warn_rules（此前只有 Edit/Write 的路径过）。
+        #
+        #    原状：warn_rules 只挂在 file_path/notebook_path 上 ——
+        #    于是【把某条规则从 CMD_DENY 降级到 WARN】对 Bash 命令
+        #    等于"完全不检查"，而不是"检查了但只警告"。
+        #    实测：posix_tmp 降级后，`find /tmp -name x` 变成 rc=0 且
+        #    stderr 全空 —— 既不放行提示、也不警告，静默通过。
+        #    那正是本项目要消灭的"静默"形状。
+        #
+        #    修法：Bash 的 command 同时过 cmd_rules（deny）与 warn_rules（警告）。
+        targets = [("command", ti.get("command") or "", cmd_rules),
+                   ("command", ti.get("command") or "", warn_rules)]
     elif tool.startswith("mcp__"):
         # 逐字段取真实值，而不是 repr(整体) —— 让锚定在 MCP 通道同样成立。
         # 但【不】把两套规则混用：命令类字段 → cmd_rules，

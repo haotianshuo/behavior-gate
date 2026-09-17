@@ -224,18 +224,57 @@ def main():
     # V2.5 修的真实误报：我在真实会话里被误拦过一次 ——
     # "A 已验证 ✅" 和 "B 未验证 ⬜" 分属不同段落、说不同的事，
     # 旧判定按全文共现，误判为自相矛盾。误报率实测约 1/3。
-    multi_section = (
+    #
+    # ⚠️ 本条用例的历史（外部复核 + 本机实测坐实，3.5.13 更正）：
+    #
+    #    原先这一条是单用例、断言 rc == 0：
+    #        multi_section = "## 结果\nG1 已验证通过…\n\n## 未验证项\n- …未验证\n"
+    #        an("分段的『已验证 + 未验证项』不再误拦", rc == 0, ...)
+    #
+    #    实测（旧版 effect_gate）：
+    #        E3 原样（分段，无证据块）  -> rc=0  放行
+    #        去掉未验证段（同样无证据块）-> rc=2  拦下
+    #    → 这一行的绿灯【完全来自"未验证段触发的提前放行"】，
+    #      与它声称要测的"同段判定"毫无关系。
+    #      也就是说：这条测试从未测过它名字所说的性质。
+    #
+    #    3.5.13 修掉那条提前放行后，它必然变红。修法不是把断言改弱，
+    #    而是【拆成两条各测一件真事】：
+    #      (a) 分段 + 有证据块 → 应放行（真测"分段不判矛盾"）
+    #      (b) 分段 + 无证据块 → 应拦  （锁住本次修复，防绕过复活）
+    #    刻意【不】去读 rule_id —— 它只在 gate-events.jsonl 里，
+    #    要读就得改 run() 的返回值、波及本文件所有调用点，
+    #    而 rc + 两条互补用例已足够表达。
+    multi_section_ok = (
         "## 结果\n"
         "G1 已验证通过，G3 也已验证。\n"
         "\n"                      # ← 空行 = 分段
         "## 未验证项\n"
         "- MCP matcher 未验证\n"
         "- 与 cbm 共存未验证\n"
+        "\n"
+        "**证据**：L2 动态\n"
+        "**风险级别**：中\n"
     )
     rc = run("effect_gate.py",
              {"session_id": sid, "stop_hook_active": False,
-              "last_assistant_message": multi_section}, tmp)
-    an("分段的『已验证 + 未验证项』不再误拦", rc == 0, "rc=%s" % rc)
+              "last_assistant_message": multi_section_ok}, tmp)
+    an("分段的『已验证 + 未验证项』不判矛盾（有证据块）", rc == 0, "rc=%s" % rc)
+
+    # (b) 缺证据块的分段收尾 —— 这是 3.5.13 修掉的那条绕过路径的回归锁。
+    #     修前它 rc=0（免责声明 = 免死金牌）；修后必须 rc=2。
+    multi_section_bad = (
+        "## 结果\n"
+        "G1 已验证通过，G3 也已验证。\n"
+        "\n"
+        "## 未验证项\n"
+        "- MCP matcher 未验证\n"
+        "- 与 cbm 共存未验证\n"
+    )
+    rc = run("effect_gate.py",
+             {"session_id": sid, "stop_hook_active": False,
+              "last_assistant_message": multi_section_bad}, tmp)
+    an("分段不能再豁免缺证据块（3.5.13 回归锁）", rc == 2, "rc=%s" % rc)
 
     same_para = "已修复，但未验证。"
     rc = run("effect_gate.py",

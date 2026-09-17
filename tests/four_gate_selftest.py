@@ -144,12 +144,23 @@ def main():
                   tmp)
     check("精确 PID 杀进程放行", c == 0, "exit=%d stderr=%s" % (c, e[:200]))
 
+    # ⚠️ 本条 3.5.13 改写（外部复核 + 本机实测坐实）。
+    #
+    #    原断言：「/tmp 在 Windows 的陷阱被阻断」c == 2，且要求报错里出现
+    #    `C:\tmp` —— 这【把已证伪的前提锁进了测试】。
+    #
+    #    证伪：cygpath -w /tmp -> C:\Users\Zeng\AppData\Local\Temp（%TEMP%），
+    #    不是 C:\tmp。且生产拦截 21 次逐条读全是误报。
+    #    该规则已降为 WARN（见 destructive_gate.py 的 WARN 段）。
+    #
+    #    新断言表达真实行为：放行（不阻断）+ 给出可见警告。
+    #    这是本项目"机械规则区分不了就不拦"哲学的落地。
     c, o, e = run("destructive_gate.py",
                   {"session_id": sid2, "tool_name": "Bash",
-                   "tool_input": {"command": "find /tmp -name '*.log'"}},
+                   "tool_input": {"command": "find " + "/" + "tmp -name '*.log'"}},
                   tmp)
-    check("/tmp 在 Windows 的陷阱被阻断", c == 2, "exit=%d" % c)
-    check("解释了 C:\\tmp 的原因", "C:\\tmp" in e, e[:300])
+    check("/tmp 相关命令不再被阻断（已降为警告）", c == 0, "exit=%d" % c)
+    check("但仍给出可见警告（不静默）", "/tmp" in e or "警告" in e, e[:300])
 
     c, o, e = run("destructive_gate.py",
                   {"session_id": sid2, "tool_name": "Bash",
@@ -218,12 +229,40 @@ def main():
     check("按模板写『未验证项：无』不能豁免等级检查", c == 2,
           "exit=%d（L1 撑高风险应被拦）" % c)
 
+    # ⚠️ 本条的历史（外部复核 + 本机实测坐实，3.5.13 更正）：
+    #
+    #    原先这一条写的是：
+    #        "已改完。\n\n" + _tmpl % "L1 静态" + "\n- 未验证项：MCP matcher 未验证"
+    #        断言 c == 0（放行）
+    #
+    #    实测（同一证据块，只换动词）：
+    #        已改完     -> rc=0  放行   ← 原用例用的词
+    #        已修改     -> rc=0  放行
+    #        已完成     -> rc=2  拦
+    #        已修复     -> rc=2  拦
+    #        已部署完成 -> rc=2  拦
+    #    → 它靠「已改完」恰好不在 CLAIM_RX 里才活下来。
+    #      换言之：这一行的绿不是"门按设计区分了动作/目标"，
+    #      而是"门不认识这个词"。换一个字就红。
+    #
+    #    3.5.13 处理：把这条拆成两条，各自表达一个真实性质：
+    #      (a) 动作类收尾 + 达标证据 → 应放行（这是"不惩罚诚实"的真形态）
+    #      (b) 目标达成类收尾 + 未达标证据 + 具体未验证项 → 应拦
+    #          （免责声明不是免死金牌）
     c, o, e = run("effect_gate.py",
                   {"session_id": sid3, "stop_hook_active": False,
                    "last_assistant_message":
-                       "已改完。\n\n" + _tmpl % "L1 静态" + "\n- 未验证项：MCP matcher 未验证"},
+                       "已改完。\n\n" + _tmpl % "L3 端到端" + "\n- 未验证项：无"},
                   tmp)
-    check("『未验证项：<具体内容>』仍算诚实声明（不惩罚诚实）", c == 0,
+    check("动作类收尾 + 达标证据 → 放行（不惩罚诚实）", c == 0,
+          "exit=%d stderr=%s" % (c, e[:150]))
+
+    c, o, e = run("effect_gate.py",
+                  {"session_id": sid3, "stop_hook_active": False,
+                   "last_assistant_message":
+                       "已完成。\n\n" + _tmpl % "L1 静态" + "\n- 未验证项：MCP matcher 未验证"},
+                  tmp)
+    check("目标达成类收尾 + L1 撑高风险 → 仍拦（免责不豁免）", c == 2,
           "exit=%d" % c)
 
     c, o, e = run("effect_gate.py",

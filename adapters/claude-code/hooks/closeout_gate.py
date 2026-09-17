@@ -9,7 +9,21 @@ G6 收口门（PreToolUse → Agent | Bash，旁路采集）
 V2 改成：宿主侧【自动采集】。
   - 纯记录，不阻断，不猜，不杀任何东西。
   - 只记录本会话实际派生过的 agent_id 和跑过的后台命令 PID。
-  - 收尾时由 closeout_report.py（或模型读取状态文件）如实呈现。
+  - 收尾时由【模型读取状态文件】如实呈现。
+
+  ⚠️ 3.5.13 更正：原来这里写「由 closeout_report.py（或模型读取状态文件）呈现」，
+     但 `closeout_report.py` **从未存在过**（外部复核 + 全盘搜索坐实：
+     `git log -S` 只命中初始提交，从未被添加）。文档承诺了一个不存在的消费者。
+     这不是"预留接口"——同一份 20 行说明的下方就写着
+     「计了数但没有任何人看得到，那和没计数是一样的」。
+     现改为只陈述真实存在的路径。
+
+  ⚠️ 状态文件的【读取契约】（此前没写，导致包外各写各的解析器）：
+     路径   <state_dir>/<session_id>.closeout.json，JSON 对象，一行一个文件。
+     键     agent_requests / background_cmds / writes / webfetch_count /
+            bash_cmds / repeat_suspects / session_id
+     稳定性 无兼容承诺 —— 字段可能随版本增删。要长期依赖请连同
+            `version` 字段一起记录，以便事后判断读的是哪一代格式。
 
 刻意不做的事：
   - 不自动 kill 任何进程（归属不明的进程一律不碰）

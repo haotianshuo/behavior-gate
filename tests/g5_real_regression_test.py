@@ -143,9 +143,12 @@ def main():
     # ---------- 真实误报案例（单独列出，因为它引发本轮修复）----------
     print("\n----- 真实误报案例（本轮修复的触发点）-----")
     rc, rule = run_gate("Bash", {"command": RM + " -rf /tmp/v350"}, tmp)
+    # ⚠️ 3.5.13 说明更新：posix_tmp_on_windows 已由 DENY 降为 WARN，
+    #    所以这条命令现在既不被 rm_rf 族拦、也不被它拦。
+    #    断言本身（不属 rm_rf 族）不变 —— 降级只会让它更容易成立。
     check("rm -rf /tmp/v350 不再被 rm_rf 族误拦",
           rule not in FAMILY,
-          "rc=%d rule=%s（posix_tmp_on_windows 拦它是另一条设计规则）" % (rc, rule),
+          "rc=%d rule=%s（posix_tmp 已降为 WARN，不再阻断）" % (rc, rule),
           "REAL：09-15 09:51 真实会话中被 rm_rf_traversal 误拦")
 
     # ---------- 字段语义不变量 ----------

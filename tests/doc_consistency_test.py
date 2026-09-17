@@ -82,7 +82,7 @@ def check(name, ok, detail=""):
 
 
 def actual_total():
-    """跑一遍【除自己外】的全部套件，返回 (合计, 每套明细)。
+    """跑一遍【除自己外】的全部套件，返回 (合计, 每套明细, 异常表)。
 
     ⚠️ 为什么【不含自己】—— 这是踩出来的设计：
        本测试不能跑自己（递归），所以它测不出自己的用例数。
@@ -93,14 +93,34 @@ def actual_total():
        现在改为：总数 = 其余套件的合计（它【能】测到的部分），
        文档写的也必须是这个数；「自己那一套」单独列，不混进总数。
        这样没有自指、没有需要手工维护的常量。
+
+    ⚠️ 异常表 errors —— 来自外部复核实测的两个缺陷：
+       1) 原实现【完全不看 p.returncode】：一个套件只要往 stdout 打印
+          「53/53 通过」然后 sys.exit(1)，本检查器仍报全绿。
+          实测：把 four_gate_selftest 换成 print('53/53 通过'); sys.exit(1)
+                → 检查器 17/17 通过 / EXIT 0。
+       2) 原实现在 subprocess.run 上给了 timeout=120，但【没有捕获
+          TimeoutExpired】。实测：套件超时 → 直接 traceback 崩溃，
+          不是一次干净的 FAIL（用户看到的是堆栈，不是"哪个套件超时"）。
+       两者都让"跑过一遍"这个前提失效，所以统一记进 errors，
+       由 main 里单独一条 check 呈现。
     """
     t = 0
     detail = {}
+    errors = {}
     for s in SUITES:
-        p = subprocess.run(
-            [sys.executable, os.path.join(PKG, "tests", s + ".py")],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        try:
+            p = subprocess.run(
+                [sys.executable, os.path.join(PKG, "tests", s + ".py")],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        except subprocess.TimeoutExpired:
+            detail[s] = 0
+            errors[s] = "超时（超过 120s 未结束）"
+            continue
         out = p.stdout.decode("utf-8", "replace")
+        # 退出码非 0 = 该套件自认失败；即使它打印了"全过"也不算通过
+        if p.returncode != 0:
+            errors[s] = "退出码 %d" % p.returncode
         m = re.findall(r"(\d+)\s*/\s*(\d+)\s*通过", out)
         n = int(m[-1][1]) if m else 0
         if not m:
@@ -108,7 +128,7 @@ def actual_total():
             n = int(m2.group(2)) if m2 else 0
         detail[s] = n
         t += n
-    return t, detail
+    return t, detail, errors
 
 
 def main():
@@ -116,11 +136,23 @@ def main():
     print("文档数字一致性回归")
     print("=" * 84)
 
-    total, detail = actual_total()
+    total, detail, errors = actual_total()
     print("\n  实际测试总数：%d" % total)
     for k, v in detail.items():
         if v == 0:
             print("    ⚠️ %s 未解析到数字" % k)
+
+    # ⚠️ 这条检查的是「跑过一遍」这个前提本身是否成立。
+    #    原实现只 grep stdout 的 "N/M 通过"，既不看 returncode 也不捕获
+    #    TimeoutExpired —— 于是「打印全过但实际失败」和「超时崩溃」都能蒙混。
+    #    实测：套件换成 print('53/53 通过'); sys.exit(1) → 原实现 17/17 全绿。
+    if errors:
+        print("\n  套件运行异常：")
+        for k, v in errors.items():
+            print("    ✗ %s：%s" % (k, v))
+    check("全部套件都正常结束（退出码 0 且未超时）",
+          not errors,
+          "异常：%s" % "；".join("%s=%s" % (k, v) for k, v in errors.items()))
 
     check("全部套件都跑出数字（无解析失败）",
           all(v > 0 for v in detail.values()),
@@ -138,6 +170,34 @@ def main():
         # 列了 2 个以上套件名 → 它就是在列测试清单 → 纳入检查
         if len(listed & set(SUITES)) >= 2:
             DOCS.append(f)
+
+    # ---- 覆盖范围自检：措辞重构不该让文档静默逃出检查 ----
+    #
+    # ⚠️ 补这个盲区（外部复核实测）：上面的纳入判据是「文档里出现 ≥2 个
+    #    套件名」—— 一个【内容启发式】，不是文件清单。后果是文档作者
+    #    在无意间拥有"关掉检查"的能力，且关掉时没有任何提示：
+    #      实测：把 README / install.md / CONTRIBUTING.md 里的套件名
+    #            _test.py 改成 _check.py → 检查项从 17 塌缩到 8，
+    #            输出仍是「8 / 8 通过」/ EXIT 0。
+    #
+    #    这条自检不写死文档清单（那会失去自动发现能力），只问一句：
+    #    没被纳入检查的候选文档里，有没有「看起来像测试总数」的数字？
+    #    有 → 它本该被查却没被查。
+    print("\n----- 覆盖范围自检（没有文档因措辞变化静默逃出）-----")
+    skipped = []
+    for f in CANDIDATE_DOCS:
+        if f in DOCS:
+            continue
+        p = os.path.join(PKG, f)
+        if not os.path.isfile(p):
+            continue
+        s = io.open(p, encoding="utf-8").read()
+        hits = sorted({int(m.group(1)) for m in PAT.finditer(s)
+                       if 80 <= int(m.group(1)) <= 999})
+        if hits:
+            skipped.append("%s（未被纳入检查，却含 %s 项）" % (f, hits[:3]))
+    check("没有文档因措辞变化静默逃出检查范围", not skipped,
+          "；".join(skipped))
 
     # ---- 列了清单的文档必须【列全】----
     # ⚠️ 这条是新增的，来自真实教训：AGENTS.md 曾只列 6/13 个套件，
@@ -192,12 +252,26 @@ def main():
         s = io.open(p, encoding="utf-8").read()
         bad = []
         for suite, n in detail.items():
-            # 找形如 "suite.py  # 53/53" 或 "suite.py # 期望 53/53"
+            # 形态 A：找形如 "suite.py  # 53/53" 或 "suite.py # 期望 53/53"
             pat = re.compile(re.escape(suite) + r"[^\n]*?(\d+)\s*/\s*(\d+)")
             for m in pat.finditer(s):
                 if int(m.group(2)) != n:
                     bad.append("%s 写成 %s（实际 %d）"
                                % (suite, m.group(0).split("/")[-1][:4], n))
+            # 形态 B：无分母写法 "suite.py  # 53"
+            #
+            # ⚠️ 补这个盲区（外部复核实测）：原实现只认【带分母】的 N/M，
+            #    而 AGENTS.md 全部 13 处都写成 `# 53`（无分母）——
+            #    逐套件命中数【全部为 0】，12 个分项数字一个都没被检查。
+            #    实测：把 AGENTS.md 的分项数字改错、保留总数锚，
+            #          检查器仍报 17/17 通过 / EXIT 0。
+            #    负向前瞻 (?!\s*/) 保证形态 B 不吞掉形态 A 的那一半。
+            pat_b = re.compile(
+                re.escape(suite) + r"[^\n]*?[#:：]\s*\**\s*(\d{1,4})\b(?!\s*/)")
+            for m in pat_b.finditer(s):
+                if int(m.group(1)) != n:
+                    bad.append("%s 写成 %s（无分母写法，实际 %d）"
+                               % (suite, m.group(1), n))
         # ⚠️ 已知盲区（如实声明，不假装能查）：
         #    本测试【查不了自己】的分项数字 —— detail 基于 SUITES，
         #    而 SUITES 刻意排除了自己（否则递归）。

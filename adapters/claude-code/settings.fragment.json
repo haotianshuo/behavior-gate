@@ -31,7 +31,8 @@
         ]
       },
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "_note": "WebFetch 在 3.5.13 补入（外部复核 + 本机实测坐实）。 3.5.3 加了 Bash/WebFetch 用量警告（bash_warn_at / webfetch_warn_at），但 matcher 里只有 Bash —— 于是 closeout_gate.py 的 WebFetch 计数分支【永不执行】，webfetch_count 恒为 0，警告永不触发。实测：48 个 closeout 文件全为 0，而 transcript 里 9 个会话共有真实主链 WebFetch 调用。同一次提交里 Bash 那半边是通的，说明是漏注册而非有意划界。 destructive_gate.py 对 WebFetch 落到 else 直接放行（:392），加进来零副作用。",
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
         "hooks": [
           {
             "type": "command",
