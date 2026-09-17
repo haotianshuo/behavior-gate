@@ -156,6 +156,43 @@ for p, key in [("不要再问我了", "intent_no_ask"),
     st = budget_of("cn") or {}
     check("中文『%s』仍识别" % p, st.get(key) is True, "%s=%s" % (key, st.get(key)))
 
+# ===== 3.5.14 新增：source 三态 + 意图语境的回归 ====
+#
+# ⚠️ 为什么补这一节（三个外部核验 agent 都指出）：
+#    3.5.14 给 budget_gate 加了三条 source 分支、给 _lib 加了
+#    INTENT_QUESTION_CTX —— 但全仓 `grep -rn "prompt:explicit" tests/`
+#    为零。三套件全绿【不代表覆盖了本轮改动】：
+#    budget_safety_test 只断言预算数值，从不读 source 字符串。
+#    「跑了」被当成「验了」—— 本项目自己批评过的形状。
+print("\n===== 3.5.14：source 三态（防伪造用户原话）=====")
+for prompt, want_src, why in [
+    ("agent_spawns: 0", "prompt:explicit", "用户真写了 agent_spawns"),
+    ("agent_depth: 0", "prompt:explicit:agent_depth",
+     "只写 depth —— 不得报成『你显式声明了 agent_spawns』"),
+    ("不要派子代理", "prompt:forbid", "明确禁令"),
+    ("帮我重构这个模块", "policy-default", "无预算声明"),
+]:
+    sid = "src_" + str(abs(hash(prompt)) % 10000)
+    call("inject_budget.py", {"session_id": sid, "prompt": prompt})
+    st = budget_of(sid) or {}
+    got = st.get("source")
+    check("source 正确：%s" % why, got == want_src,
+          "prompt=%r 期望 %s 实际 %s" % (prompt, want_src, got))
+
+print("\n===== 3.5.14：意图语境（疑问≠禁令，禁令≠授权）=====")
+for prompt, must_not_be, why in [
+    ("要不要派子代理来做这个？", "prompt:forbid", "疑问不得读成禁令"),
+    ("不要派太多子代理", "policy-default", "『太多』是有限度，不是取消"),
+    ("不允许派子代理", "prompt:permit", "禁令不得读成授权"),
+    ("确认修复完成", "prompt:forbid", "普通动词不得命中 forbid"),
+]:
+    sid = "int_" + str(abs(hash(prompt)) % 10000)
+    call("inject_budget.py", {"session_id": sid, "prompt": prompt})
+    st = budget_of(sid) or {}
+    got = st.get("source")
+    check("意图正确：%s" % why, got != must_not_be,
+          "prompt=%r 不该是 %s（实际 %s）" % (prompt, must_not_be, got))
+
 print("\n" + "=" * 62)
 ok = sum(1 for _, c, _ in res if c)
 print("预算安全测试：%d / %d 通过" % (ok, len(res)))

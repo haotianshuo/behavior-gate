@@ -2,7 +2,7 @@
 
 > 给 Claude Code 加五道**机械门**，治「AI 助手想多做、做了却说完成了」这类毛病。
 >
-> 当前版本：**V3.5.13** ｜ 2026-09-17
+> 当前版本：**V3.5.14** ｜ 2026-09-18
 > 许可证：[MIT](LICENSE)
 
 ---
@@ -129,13 +129,13 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **298 项**全过 —— 12 套功能测试 298，外加本检查器自身 19 项）：
+跑测试（预期 **306 项**全过 —— 12 套功能测试 306，外加本检查器自身 20 项）：
 
 ```bash
 python tests/four_gate_selftest.py        # 54/54
 python tests/cmd_chain_test.py            # 21/21
 python tests/adversarial_test.py          # 25/25
-python tests/budget_safety_test.py        # 30/30
+python tests/budget_safety_test.py        # 38/38
 python tests/intent_gate_test.py          # 21/21
 python tests/upgrade_path_test.py         # 19/19
 python tests/g5_real_regression_test.py   # 25/25  ← 真实会话挖出的用例
@@ -144,7 +144,7 @@ python tests/gate_events_test.py          # 33/33  ← Gate 事件记录
 python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
 python tests/install_cli_test.py          # 12/12  ← 安装参数回归
 python tests/mcp_field_dispatch_test.py   # 27/27  ← MCP 字段分派
-python tests/doc_consistency_test.py      # 19/19  ← 文档数字一致性
+python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
 ```
 
 > **synthetic 与 REAL 分开** —— `tests/` 里前六套是按规则构造的用例（写法理想）；
@@ -267,7 +267,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（78 项真实问题）
+├─ CHANGELOG.md                    变更记录（87 项真实问题）
 ├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
@@ -276,7 +276,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十三套测试（298 项，含真实回归）
+└─ tests/                          十三套测试（306 项，含真实回归）
 ```
 
 ---

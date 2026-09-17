@@ -421,6 +421,161 @@ def main():
     eff_problems = [p for p in eff_problems
                     if not p.startswith("找不到已安装")]
 
+    # ---- 注册配置一致性（3.5.14 补，外部复核实测）----
+    #
+    # ⚠️ 本工具 docstring 的第一条就写着它要抓：
+    #      「改了 settings.fragment.json 的命令格式，但注册的配置是旧的」
+    #    实测它【抓不到】：
+    #      scan_dir 只扫 hooks/ 目录，而 settings.fragment.json 在上一层 →
+    #      不在扫描范围。实测把源 fragment 的 matcher 从 "…|WebFetch" 改成
+    #      "Bash|Edit|Write"（源变了、已装的没变）→ 本工具仍判 MATCH / rc=0。
+    #
+    #    后果：只换 hooks 文件、没重跑 install.py 的用户，
+    #          settings.json 里的 matcher 仍是旧的，且【静默】。
+    #
+    #    ⚠️ 为什么不能靠"比两个文件的 sha256"：
+    #      两侧文件名与位置都不同（源是 adapters/claude-code/settings.fragment.json，
+    #      已装是 <scope>/settings.json），且源文件含 {{HOOKS}}/{{PYTHON}} 占位符。
+    #      直接比字节永远不等。
+    #
+    #    正确判据（与 load_effective_policy 同一思路：看【实际生效的】）：
+    #      用源的 fragment 经 install.build_fragment 展开后，与
+    #      【已装 settings.json 里我们那几条 hook 条目】比对。
+    #      找不到已装 settings.json 就跳过（不引入新失败）。
+    cfg_problems = []
+    frag_src = os.path.normpath(
+        os.path.join(a.source, "..", "settings.fragment.json"))
+    # 已装 settings 的位置：hooks/ 的上一层。
+    #
+    # ⚠️ 3.5.14：文件名【随 scope 不同】——
+    #      全局   <scope>/settings.json
+    #      项目级 <scope>/settings.local.json   ← install.py 的【默认 scope】
+    #    原先只找 settings.json，于是项目级（默认）场景下 isfile()=False
+    #    → 整块检查【不执行】且连"跳过"都不打印 → 100% 缺失，且静默。
+    #    实测：同一份变异，全局形态报 CONFIG_DRIFT，项目级形态报 MATCH。
+    #    修法：两个名字都找。
+    _base = os.path.normpath(os.path.join(a.installed, ".."))
+    # ⚠️ 3.5.14：两个文件【都读】，不能取第一个就 break。
+    #
+    #    Claude Code 里 settings.local.json 的优先级【高于】settings.json，
+    #    常见形态是 settings.json 进 git（放 permissions）、
+    #    settings.local.json 放个人 hooks —— 两者可以并存且内容不同。
+    #
+    #    第一版 `for ... break` 取第一个存在的 → 实测两种错：
+    #      · 有 settings.json（无我们 hooks）+ settings.local.json（漂移了）
+    #        → 静默 PASS（比修复前的"整块不跑"更难查：报错看起来很正常）
+    #      · settings.json（无 hooks）+ settings.local.json（完好）
+    #        → 假报 6 条 CONFIG_DRIFT → 会卡住安装（CONFIG_DRIFT 在 BLOCKING 里）
+    #
+    #    修法：都读，逐个比对；任一个缺条目就报它。
+    inst_settings_list = [
+        os.path.join(_base, n)
+        for n in ("settings.json", "settings.local.json")
+        if os.path.isfile(os.path.join(_base, n))
+    ]
+    if os.path.isfile(frag_src) and inst_settings_list:
+        try:
+            frag = json.load(open(frag_src, encoding="utf-8"))
+            # ⚠️ 3.5.14 第三轮修复：这里原来还留着一行
+            #      `inst = json.load(open(inst_settings, ...))` ——
+            #      `inst_settings` 是改名前的旧变量（现已改为 inst_settings_list），
+            #      导致**每次比对都抛 NameError**，被 except 吞成 CONFIG_DRIFT。
+            #      后果是 P0 阻断：只要 fragment 存在且上层有任一 settings 文件
+            #      （正常已装环境总是成立），install.py 的两条路径都会 rc=2 中止。
+            #      实测：`CONFIG_DRIFT: 比对注册配置时出错 NameError: ...`
+            #      修法：删掉这行 —— 多文件循环里会逐个读。
+
+            # ⚠️ 判据：比对 hook 脚本的【basename】，不比对字面 command。
+            #    原因：fragment 里是 {{PYTHON}}/{{HOOKS}} 占位符，
+            #    已装的是展开后的绝对路径 —— 字面永远不等。
+            #    而 basename（如 budget_gate.py）两侧相同，且能抓到
+            #    "matcher 对了但挂的脚本换了一个"。
+            #
+            # ⚠️ 已知不覆盖（外部复核指出，**未修**，如实声明不假装已修）：
+            #    · 解释器路径（{{PYTHON}} 被改成不存在的 exe）—— 只取脚本名，看不见
+            #    · 扩展名白名单只有 .py / .cmd —— 换成 .bat/.ps1 → 返回空列表 → 恒 MATCH
+            #    · timeout 值、hook 被禁用、已装【多】出一条（只判"少"不判"多"）
+            #    所以这是「matcher + 脚本名单对账」，不是「注册配置一致性」。
+            #
+            # ⚠️ 3.5.14 第二版修复（外部复核）：
+            #    第一版只用 `len(hooks)` 比数量 —— 实测把
+            #    PreToolUse/Agent 从 2 个 hook 删成 1 个仍判 MATCH，
+            #    因为数量【算了但从没参与判断】。现在真的比内容。
+            def _scripts(entry):
+                out = []
+                for h in (entry.get("hooks") or []):
+                    cmd = str(h.get("command") or "")
+                    # ⚠️ 只取【被引号裹起来的】路径里的 basename。
+                    #
+                    #    直接 `findall(r"([\w.-]+\.(?:py|cmd))")` 会误匹配
+                    #    目录名（实测：`"C:/my.py.dir/python.exe"` → 命中 `my.py`）。
+                    #    取 `[-1]` 能侥幸躲过那一例，但换个顺序就错。
+                    #    绑到引号上才稳：install.py 生成的 command 形态是
+                    #        "<python>" "<hooks>/<script>.py"
+                    #    两侧都带引号（见 settings.fragment.json）。
+                    names = re.findall(
+                        r"""["']([^"']*?([\w.-]+\.(?:py|cmd)))["']""", cmd, re.I)
+                    if names:
+                        out.append(names[-1][1].lower())
+                return sorted(out)
+
+            want = {}
+            for ev, entries in (frag.get("hooks") or {}).items():
+                for e in entries:
+                    want.setdefault((ev, e.get("matcher")), []).extend(_scripts(e))
+
+            # ⚠️ 对【每一个】已装 settings 文件都比一遍 —— 两个文件可能并存，
+            #    任一个缺条目都算漂移（见上面关于优先级的说明）。
+            #    但如果【某个文件里压根没有任何本包声明的条目】，那是
+            #    "这个文件不管本包的事"，不算漂移（避免误报）。
+            for _sp in inst_settings_list:
+                inst = json.load(open(_sp, encoding="utf-8"))
+                _fname = os.path.basename(_sp)
+                have = {}
+                for ev, entries in (inst.get("hooks") or {}).items():
+                    for e in entries:
+                        have.setdefault((ev, e.get("matcher")), []).extend(_scripts(e))
+                # ⚠️ 3.5.14 第三轮修复（外部核验发现新问题 A）：
+                #    `any(k in have)` 只比【(event, matcher) 完全相同的】键 ——
+                #    若已装的 matcher 被改名（如 `Bash|Edit` → `Bash`），
+                #    源里任何 k 都不在 have 里 → _any 假 → 【整个文件静默跳过】
+                #    → 单文件场景（项目级 settings.local.json）下，
+                #      改一个 matcher 即可让全包逃检。
+                #    修法：补一个【按 event 的兜底】—— 只要该文件在某个
+                #    event 下有本包的任何脚本，就说明它管本包的事。
+                _any = any(k in have for k in want)
+                if not _any:
+                    _our_scripts = {s for sc in want.values() for s in sc}
+                    for ev, entries in (inst.get("hooks") or {}).items():
+                        for e in entries:
+                            if _our_scripts & set(_scripts(e)):
+                                _any = True
+                                break
+                        if _any:
+                            break
+                if not _any:
+                    continue        # 这个文件确实不管本包的事，跳过
+                for k, scripts in want.items():
+                    got = have.get(k)
+                    if got is None:
+                        cfg_problems.append(
+                            "CONFIG_DRIFT: %s 缺注册项 %s —— "
+                            "改了 fragment 但没重跑 install.py" % (_fname, k))
+                        continue
+                    miss = [s for s in scripts if s not in got]
+                    if miss:
+                        cfg_problems.append(
+                            "CONFIG_DRIFT: %s 的 %s 下缺 hook %s（已装 %s）—— "
+                            "改了 fragment 但没重跑 install.py"
+                            % (_fname, k, miss, got))
+        except Exception as e:
+            # ⚠️ 收窄异常：只捕【读/解析】类错误，不把逻辑 bug 也吞成 CONFIG_DRIFT
+            #    （外部复核指出 `except Exception` 过宽会归因不准）。
+            cfg_problems.append(
+                "CONFIG_DRIFT: 比对注册配置时出错 %s: %s"
+                % (type(e).__name__, e))
+    eff_problems += cfg_problems
+
     # ⚠️ MISSING【不】算漂移（实测踩到）。
     #
     #   漂移 = 「已经装过，但内容和源码对不上」—— 那是"被改坏了"的信号。
@@ -563,12 +718,36 @@ def main():
     #      ok=False 但 status 仍打印 MATCH —— 上面列着问题、下面判 MATCH，
     #      正是本项目自己批评过的自相矛盾形状。
     #    判据："status 说没事" 与 "ok 说有事" 不允许同时成立。
-    if eff_problems and status == "MATCH":
-        status = "EFFECTIVE_POLICY_PROBLEM"
+    #    ⚠️ 3.5.14 第三轮修复（外部核验发现新问题 D）：
+    #      原判据 `status == "MATCH"`【太窄】—— 实测真实漂移 +
+    #      LEGACY_BASELINE_MIGRATION 时，status 不变、blocking 为 False、
+    #      **rc=0**，而 effectiveProblems 里明明列着 CONFIG_DRIFT。
+    #      LEGACY_BASELINE_MIGRATION / NORMAL_UPGRADE / SOURCE_ADVANCED
+    #      全部漏网 —— 而那正是【升级与迁移的主路径】。
+    #      修法：任何"看起来没事"的状态都要被 eff_problems 提升。
+    _CALM = ("MATCH", "FRESH_INSTALL", "LEGACY_BASELINE_MIGRATION",
+             "NORMAL_UPGRADE", "SOURCE_ADVANCED")
+    if eff_problems and status in _CALM:
+        # ⚠️ 3.5.14：配置文件漂移单独给一个状态码，不混进 EFFECTIVE_POLICY_PROBLEM。
+        #    两者的处置不同 —— 前者要"重跑 install.py"，后者要"查策略内容"。
+        if any(p.startswith("CONFIG_DRIFT") for p in eff_problems):
+            status = "CONFIG_DRIFT"
+        else:
+            status = "EFFECTIVE_POLICY_PROBLEM"
 
+    # ⚠️ 3.5.14 第四轮修正（本机实测 upgrade_path 被误拦）：
+    #    CONFIG_DRIFT 的语义要【分预检/终检】——
+    #      · 预检（复制前，install.py 升级路径）：旧安装缺条目是【预期的】，
+    #        install.py 本来就是来补它们的 → 不该 BLOCKING
+    #      · 终检（复制后，带 --require-complete）：此时还缺才是【真问题】
+    #    实测：不加这个区分，测试构造的"V2.6 残留旧安装"场景下
+    #    install.py 预检 rc=2 中止 → 升级永久失败（4 条下游断言 FAIL）。
+    #    判据复用已有的 --require-complete（它本来就是"复制后终检"的开关）。
     BLOCKING = {"MANIFEST_INTEGRITY_FAILURE", "DEPLOYMENT_DRIFT",
                 "SOURCE_IDENTITY_UNPROVEN", "SOURCE_IDENTITY_DRIFT",
                 "EFFECTIVE_POLICY_PROBLEM"}
+    if a.require_complete:
+        BLOCKING.add("CONFIG_DRIFT")     # 终检才把配置漂移当硬失败
     ok = status not in BLOCKING
 
     if a.write_manifest:
@@ -612,7 +791,14 @@ def main():
         os.replace(tmp, mp)
 
     BLOCKING = {"MANIFEST_INTEGRITY_FAILURE", "DEPLOYMENT_DRIFT",
-                "SOURCE_IDENTITY_UNPROVEN", "SOURCE_IDENTITY_DRIFT"}
+                "SOURCE_IDENTITY_UNPROVEN", "SOURCE_IDENTITY_DRIFT",
+                # ⚠️ 3.5.14：这份 BLOCKING 曾漏掉 CONFIG_DRIFT（上面那份有），
+                #    后果是 --json 模式下 "blocking": false 而 rc=2 ——
+                #    【JSON 说没事、退出码说有事】，正是本文件自己批评过的形状。
+                #    修法：与上面那份同源 —— CONFIG_DRIFT 也按 require_complete 定。
+                "EFFECTIVE_POLICY_PROBLEM"}
+    if a.require_complete:
+        BLOCKING.add("CONFIG_DRIFT")
 
     result = {
         "status": status,

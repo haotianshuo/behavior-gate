@@ -278,8 +278,19 @@ def main():
         #    实测踩到：四份文档都写着「doc_consistency_test # 9/9」，
         #    而它已涨到 17 —— 没有任何自动检查发现。
         #    改它的项数时【必须手工同步这四份文档】。
-        check("%s 分项数字正确" % f, not bad,
-              "；".join(bad[:3]) if bad else "")
+        # ⚠️ 3.5.14：若某套件跑出 0（崩了/超时），它的分项数字【不可信】——
+        #    此时报「写成 54（实际 0）」是【假阳性】：文档写的是对的，
+        #    错的是那个套件根本没跑出数字。
+        #    外部复核指出：下游 check 手上已有 `errors` 却从不引用它。
+        #    修法：把 errors 里的套件从分项比对中排除，并在 detail 里说明。
+        bad_real = []
+        for item in bad:
+            suite_name = item.split(" ")[0]
+            if suite_name in errors:
+                continue        # 该套件没跑通，它的数字不可信 —— 跳过
+            bad_real.append(item)
+        check("%s 分项数字正确" % f, not bad_real,
+              "；".join(bad_real[:3]) if bad_real else "")
 
     # ---- CHANGELOG 的「N 项真实问题」必须等于实际条目数 ----
     # ⚠️ 补盲区：原来只查「N 项测试」，漏了「N 项真实问题」——
@@ -306,6 +317,99 @@ def main():
         if re.search(r"\d+\s*项真实问题", s2):
             check("%s 的 CHANGELOG 项数正确" % f, not bad, "；".join(bad))
 
+    # ---- CHANGELOG 自己也要被查（3.5.14 补，外部复核实测）----
+    #
+    # ⚠️ 为什么单独一段，而不是把 CHANGELOG.md 加进 CANDIDATE_DOCS：
+    #    CANDIDATE_DOCS 的纳入判据是「文档里出现 ≥2 个套件名 → 它在列测试清单」。
+    #    CHANGELOG 在【问题描述】里会引用套件名（如「`doc_consistency_test` 的
+    #    基准自指」），实测命中 4 个 → 会被判为"在列清单" → 被要求列全 13 个。
+    #    但它不是在列清单，是在描述历史问题 → 直接加进去会误报。
+    #
+    # ⚠️ 这段补的是一个【覆盖范围实际缩小】的历史遗留：
+    #    更早的审计脚本 `_audit/doc_audit.py` 的文档清单里【含 CHANGELOG.md】，
+    #    迁到本检查器时被移出，且无任何说明。后果是 CHANGELOG 自己的两处数字
+    #    （`## 全部问题与修复（N 项）` 与 `**统计**：共 N 项`）完全不受检查 ——
+    #    条目增减而这两处不更新时，零告警。
+    #    这正是本检查器存在的理由（防"同一类数字在另一处复发"）。
+    print("\n----- CHANGELOG 自身的项数必须自洽 -----")
+    #
+    # ⚠️ 3.5.14 第一版有四个漏洞（外部复核实测，已全修）：
+    #    ① 判据用裸子串 `"统计" in line` → 命中【问题描述】里的"统计"
+    #       （如 #66 的「按前缀统计会把两者并成一类」），插个数就误报
+    #    ② 标题措辞一改（「全部问题与修复」→「全部问题清单」）→ 静默失效
+    #    ③ 数字**加粗**（`共 **999** 项`）→ 完全失明（正则匹配不到）
+    #    ④ 分级换词（🔴→「高」）→ 误报
+    #
+    #    正确做法（外部复核建议）：-
+    #      · 用【锚定行首的正则】找标题，找不到就 FAIL（不是静默跳过）
+    #      · 容忍粗体（`\**` 包在数字两侧）
+    #      · 排除条件锚在"该行是分级统计"这个语义上，而非 emoji 字面
+    # ⚠️ 这里【不预定义】正则常量 —— 第一版定义了 _TITLE_RX/_STAT_RX/_NUM_RX
+    #    三个，但代码里用的是内联的 re.match/re.search，三个常量【零引用】。
+    #    那正是本项目反复批评的"定义了但没接线"（同 ACTION_ONLY_CLAIM_RX）。
+    #    要么用、要么不定义 —— 现在按位置就地写。
+
+    cl_self = []
+    # ① 标题必须存在（措辞改了要报，不能静默）
+    title_line = None
+    title_num = None
+    for i, line in enumerate(cl.split("\n"), 1):
+        m = re.match(r"^##\s*全部问题与修复", line)
+        if m:
+            title_line = i
+            mm = re.search(r"（\**\s*(\d+)\s*\**\s*项）", line)
+            if mm:
+                title_num = int(mm.group(1))
+            break
+    if title_line is None:
+        cl_self.append("找不到标题「## 全部问题与修复」（措辞改了吗？）")
+    elif title_num is None:
+        cl_self.append("标题里没有「（N 项）」")
+    elif title_num != n_issues:
+        cl_self.append("行 %d：标题写着 %d 项（实际 %d）"
+                       % (title_line, title_num, n_issues))
+
+    # ② 统计行
+    #
+    # ⚠️ 3.5.14 第二轮修复（外部复核实测，第一版有三个漏洞）：
+    #    ① 【整行删掉 / 去掉粗体 / 换标记】→ 循环体匹配 0 行 → **零告警**
+    #       （标题那侧有 `title_line is None → FAIL` 兜底，统计这侧没有）
+    #    ② 取【第一个】数字 → 分级在前时误报
+    #       （`**统计**：🔴 21 项，共 78 项` 取到 21）
+    #    ③ 多行标题只取第一行（有 break）
+    #
+    #    修法：
+    #      · 统计行用一个【宽判据】匹配（容忍粗体/下划线/标题符），
+    #        找不到就 FAIL —— 不再静默
+    #      · 取【最大值】而非第一个（总数必然 ≥ 各分级数）
+    #    ⚠️ 3.5.14 第三轮修复（本机自查实测，第二轮有两个漏洞）：
+    #      ① 列表符/引用符开头（`- **统计**：` / `> **统计**：`）不匹配
+    #         `^[#\s_*]*`（不含 `-` `>`）→ 判"找不到统计行" → 误报
+    #      ② `max(nums)` 的代价：统计行含【更大的无关数】
+    #         （如 `共 78 项（另有 298 项测试）`）→ max 取到 298 → 误报
+    #
+    #    改用【显式锚定总数】：只在「共/总共/合计」后面取数字。
+    _STAT_LOOSE = re.compile(r"^[#\s_*>+\-]*统计[_*\s]*\s*[:：]")
+    _TOTAL_RX = re.compile(r"(?:共|总共|合计)\s*\**\s*(\d+)\s*\**\s*项")
+
+    stat_found = False
+    for i, line in enumerate(cl.split("\n"), 1):
+        if not _STAT_LOOSE.match(line):
+            continue
+        stat_found = True
+        m = _TOTAL_RX.search(line)
+        if not m:
+            cl_self.append("行 %d：统计行里没找到「共 N 项」" % i)
+            continue
+        n = int(m.group(1))
+        if n != n_issues:
+            cl_self.append("行 %d：统计写着 %d 项（实际 %d）" % (i, n, n_issues))
+    if not stat_found:
+        cl_self.append("找不到统计行（删了？或改了标记？）")
+
+    check("CHANGELOG 自身的项数自洽", not cl_self,
+          "；".join(cl_self[:3]))
+
     # ---- 文档里的「N 项测试」必须等于【功能测试】合计 ----
     #
     # ⚠️ 口径：总数【只算被检查的 12 套功能测试】（当前 296），
@@ -322,15 +426,34 @@ def main():
     #    「296 项功能测试 + 1 个检查器」也比「313 项」更准确 ——
     #    检查器不是功能，它没有「通过/不通过」以外的产品意义。
     print("\n----- 文档中的「N 项」必须等于功能测试合计（%d）-----" % total)
+    # ⚠️ 3.5.14：若前面的套件没跑通，`total` 本身已是错的 ——
+    #    此时报「写着 298 项（应为 244）」是【假阳性】：文档是对的，
+    #    少掉的那 54 来自崩掉的套件。
+    #    外部复核指出：下游 check 只看 total、从不引用 errors。
+    #    修法：total 不可信时，这条检查改为【提示而非 FAIL】。
+    total_reliable = not errors
     for f in DOCS:
         p2 = os.path.join(PKG, f)
         s2 = io.open(p2, encoding="utf-8").read()
         bad = []
-        for i, line in enumerate(s2.split("\n"), 1):
-            for m in PAT.finditer(line):
-                n = int(m.group(1))
-                if 80 <= n <= 999 and n != total:
-                    bad.append("行 %d：写着 %d 项（应为 %d）" % (i, n, total))
+        if total_reliable:
+            for i, line in enumerate(s2.split("\n"), 1):
+                for m in PAT.finditer(line):
+                    n = int(m.group(1))
+                    # ⚠️ 3.5.14：排除【后接限定词的「N 项」】——
+                    #    它们不是测试总数。实测踩到：CHANGELOG 项数涨到 87
+                    #    （落在 80-999 窗口内），README 的「87 项真实问题」
+                    #    被误判成过期测试数。
+                    #    窗口 `80 <= n <= 999` 是拍脑袋的（N5 核验指出），
+                    #    这里补一层语义排除而不是调窗口。
+                    tail = line[m.end():m.end() + 6]
+                    if re.match(r"\s*(真实问题|问题|条目|用例|个|条|份|次|行|字节)",
+                                tail):
+                        continue
+                    if 80 <= n <= 999 and n != total:
+                        bad.append("行 %d：写着 %d 项（应为 %d）" % (i, n, total))
+        else:
+            print("      （跳过：有套件未跑通，total=%d 不可信）" % total)
         check("%s 无过期测试数" % f, not bad, "；".join(bad))
 
     npass = sum(1 for _, ok, _ in _results if ok)

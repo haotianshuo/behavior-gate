@@ -890,14 +890,55 @@ HARD_CAPS = {
 }
 
 # 用户口语里"允许派生"的信号
+#
+# ⚠️ 3.5.14：`用\s*Agent` 太宽 —— 实测命中两条纯描述/提问：
+#      「怎么用 Agent 做这个」 / 「使用 Agent 做这个」
+#    用户是在【描述动作】或【提问】，不是"授权你派 3 个"。
+#    收紧成 `可以派` 一族（表达许可的动词），去掉裸的「用 Agent」。
+#
+# ⚠️⚠️ 3.5.14 第二轮修复（外部核验发现阻断级回归）：
+#    第一版收紧时【顺手加了】`允许派` / `并行处理` —— 而
+#        「不允许派子代理」包含「允许派」     → 判成 permit
+#        「禁止并行处理」含「并行处理」        → 判成 permit
+#    **把用户的禁令读成了授权**（cap 从 0 变 3）—— 方向最危险的一类错。
+#    根因：permit 表里放【裸前缀 token】—— 中文否定式（不/别/禁/勿）
+#    无需枚举即可构造。permit 表必须有【否定前瞻】。
+#
+#    另：`并行处理` 也过宽（它常出现在描述里），一并去掉；
+#    「并行」类表达由 `允许并行`/`并行调研` 覆盖。
 SPAWN_PERMIT = re.compile(
-    r"(可以派\s*[Aa]gent|允许并行|用\s*[Aa]gent|派个子?代理|多个子\s*[Aa]gent|并行调研|allow\s+subagents)",
+    r"(可以派\s*[Aa]gent|(?<![不别禁勿])允许并行|派个子?代理|"
+    r"多个子\s*[Aa]gent|并行调研|allow\s+subagents)",
     re.I)
 
 # 用户口语里"不要派生"的信号
 SPAWN_FORBID = re.compile(
     r"(不要派|别派|禁止派|不用\s*[Aa]gent|不要开后台|别开后台|不要用子代理)",
     re.I)
+
+# ⚠️ 疑问 / 条件 / 举例语境（3.5.14 补，外部复核实测）。
+#
+#    修前：SPAWN_FORBID / SPAWN_PERMIT 直接 search 短子串，
+#    中文里必然被穿透。实测的三条假阳性：
+#        「要不要派子代理来做这个？」 → 命中 `不要派` → 读成【禁令】
+#            → 门还会报「你在 prompt 里说了不要派子代理」——把【疑问】伪造为【禁令】
+#        「不要派太多子代理」        → 用户说的是"太多"，被读成"一个都别派"
+#        「怎么用 Agent 做这个」      → 命中 `用 Agent` → 读成【授权 3 个】
+#        「使用 Agent 做这个」        → 同上
+#
+#    这一层与 DISCUSSION_CTX 是同一思路（看信号【前面】有没有语境词），
+#    但补的是疑问/条件类 —— DISCUSSION_CTX 只覆盖了"讨论/建议/文档"。
+INTENT_QUESTION_CTX = re.compile(
+    r"(要不要|是不是|能否|能不能|可不可以|该不该|是否|有没有|"
+    r"怎么|如何|为何|为什么|何时|哪里|哪个|多少|"
+    r"如果|假如|若|万一|一旦|假设)", re.I)
+# ⚠️ 3.5.14 第二轮修正（外部核验实测）：
+#    ① 删掉 `?` / `？` —— 它把「不要派子代理?」（漏写句号）也判成疑问
+#       → 真禁令失效。疑问应由【疑问词】判定，不该由标点判定。
+#    ② 删掉「太多/过多/太少/不够」—— 用户说「不要派太多」表达的是
+#       **有限度地派**，把它归入疑问语境抹掉，比误判成"一个都别派"
+#       更远离用户意图。这类词改由专门的判据处理（见 detect_* 注释）。
+#    ③ 保留疑问词与条件词 —— 它们是真正的"非断言"信号。
 
 
 def parse_budget_from_prompt(prompt, policy):
@@ -919,10 +960,38 @@ def parse_budget_from_prompt(prompt, policy):
 
         # 口语信号同样要过讨论语境（#47 同类）。
         # 否则「他在质疑『不要开后台』这条规则」会被当成用户禁止后台。
+        #
+        # ⚠️ 3.5.14：再加一层【疑问/条件】排除（外部复核实测）。
+        #    修前实测的三条假阳性：
+        #      「要不要派子代理来做这个？」 → 命中 `不要派` → 读成【禁令】，
+        #          门还会报「你在 prompt 里说了不要派子代理」——
+        #          **把用户的疑问伪造为用户的禁令**（用户没表达任何偏好）
+        #      「不要派太多子代理」 → 用户说的是"太多"，读成"一个都别派"
+        #      「怎么用 Agent 做这个」 → 命中 `用 Agent` → 读成【授权 3 个】
+        def _ok(m, rx):
+            # ⚠️ 3.5.14：前视窗口【往前多取一个字符】。
+            #
+            #    实测踩到：「要不要派子代理」里的信号是 `不要派`（位置 1），
+            #    它前面的窗口只含「要」——而疑问词「要不要」与信号**共享字**，
+            #    纯前视抓不到 → 排除失败。
+            #    多取 1 字符让窗口含到重叠的那一字。
+            #    另加【整句】兜底：句子里有疑问/条件词且信号不在句首时也算可疑。
+            before = said[max(0, m.start() - 26):m.start() + 1]
+            if rx.search(before):
+                return False
+            # 整句兜底：取信号所在的那一句（到句末标点为止）
+            seg_start = max(0, m.start() - 40)
+            seg = said[seg_start:m.end() + 40]
+            # 只在【疑问/条件】语境下用整句兜底（DISCUSSION_CTX 仍用窗口，
+            # 因为"文档/报告"这类词在长句里很常见，整句会误伤真声明）
+            if rx is INTENT_QUESTION_CTX and rx.search(seg):
+                return False
+            return True
+
         _forbid = [m.group(0) for m in SPAWN_FORBID.finditer(said)
-                   if not DISCUSSION_CTX.search(said[max(0, m.start()-25):m.start()])]
+                   if _ok(m, DISCUSSION_CTX) and _ok(m, INTENT_QUESTION_CTX)]
         _permit = [m.group(0) for m in SPAWN_PERMIT.finditer(said)
-                   if not DISCUSSION_CTX.search(said[max(0, m.start()-25):m.start()])]
+                   if _ok(m, DISCUSSION_CTX) and _ok(m, INTENT_QUESTION_CTX)]
 
         if _forbid:
             budget["agent_spawns"] = 0
@@ -934,6 +1003,7 @@ def parse_budget_from_prompt(prompt, policy):
         # 第二道防线：剔除紧邻讨论语境的匹配（#47）。
         # findall 换成 _drop_discussed_hits，语义等价但会跳过"被讨论的"。
         hits = _drop_discussed_hits(said, BUDGET_LINE)
+        _hit_keys = set()
         if hits:
             for key, val in hits:
                 # BUG-2 修复：类型/取值校验。
@@ -949,7 +1019,21 @@ def parse_budget_from_prompt(prompt, policy):
                 if cap is not None and n > cap:
                     n = cap          # 压到硬上限，而不是拒绝（用户意图仍被尊重）
                 budget[key.lower()] = n
+                _hit_keys.add(key.lower())
+            # ⚠️ 3.5.14：source 必须带上【命中了哪个键】（外部复核实测）。
+            #
+            #    修前：只要任意 BUDGET_LINE 命中就写 "prompt:explicit"。
+            #    后果：用户写 `agent_depth: 0`（只调深度、没碰派生数）时，
+            #          source 也被写成 prompt:explicit ——
+            #          而 G1 的分流文案据此断言「你本轮显式声明了
+            #          agent_spawns = 0」，**用户根本没写这一句**。
+            #    实测：prompt='agent_depth: 0 帮我看看' → 报出上面那句假引用。
+            #
+            #    修法：把命中的键附在 source 里（`prompt:explicit:agent_spawns`）。
+            #    G1 只在【真的命中 agent_spawns】时才说"你显式声明了"。
             source = "prompt:explicit"
+            if _hit_keys and "agent_spawns" not in _hit_keys:
+                source = "prompt:explicit:" + ",".join(sorted(_hit_keys))
 
     return budget, source
 

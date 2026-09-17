@@ -1,6 +1,6 @@
 # 行为门安装说明
 
-> 对应版本：**V3.5.13** ｜ 2026-09-17
+> 对应版本：**V3.5.14** ｜ 2026-09-18
 >
 > ⚠️ **它证明不了什么，和它能拦什么同样重要 —— 见下面的「已知边界」。**
 > 一句话：门管的是「行动方式」和「格式」，不是「判断对不对」。
@@ -8,7 +8,7 @@
 > 当前实测：四关 54/54、安装链路 21/21、对抗 25/25、预算安全 30/30、
 > 　　　　　意图门 21/21、升级路径 19/19、G5 真实回归 25/25、
 > 　　　　　源身份一致性 13/13、Gate 事件 33/33、Windows 路径 18/18、
-> 　　　　　安装参数 12/12、MCP 字段分派 27/27（=298 项）
+> 　　　　　安装参数 12/12、MCP 字段分派 27/27（=306 项）
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -57,7 +57,7 @@ python install.py --scope global --apply   # 安装
 python tests/four_gate_selftest.py        # 期望 54/54
 python tests/cmd_chain_test.py            # 期望 21/21
 python tests/adversarial_test.py          # 期望 25/25
-python tests/budget_safety_test.py        # 期望 30/30
+python tests/budget_safety_test.py        # 期望 38/38
 python tests/intent_gate_test.py          # 期望 21/21
 python tests/upgrade_path_test.py         # 期望 19/19
 python tests/g5_real_regression_test.py   # 期望 25/25  ← 真实会话用例
@@ -66,10 +66,10 @@ python tests/gate_events_test.py          # 期望 33/33
 python tests/g5_windows_path_test.py      # 期望 18/18
 python tests/install_cli_test.py          # 期望 12/12
 python tests/mcp_field_dispatch_test.py   # 期望 27/27
-python tests/doc_consistency_test.py      # 期望 19/19
+python tests/doc_consistency_test.py      # 期望 20/20
 ```
 
-**合计 298 项**（12 套功能测试；`doc_consistency_test` 是检查器，不计入）。
+**合计 306 项**（12 套功能测试；`doc_consistency_test` 是检查器，不计入）。
 也可以一次跑完：
 
 ```bash
@@ -212,7 +212,7 @@ MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd �
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          十三套测试（=298 项）
+└─ tests/                          十三套测试（=306 项）
 ```
 
 ### 五道门

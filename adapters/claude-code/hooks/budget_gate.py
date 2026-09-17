@@ -74,9 +74,9 @@ def main():
         used = used_v if used_ok else 0
 
         if cap == 0:
-            return st, ("DENY_ZERO", used, cap)
+            return st, ("DENY_FORBIDDEN_BY_TASK", used, cap)
         if used >= cap:
-            return st, ("DENY_EXHAUSTED", used, cap)
+            return st, ("DENY_QUOTA_EXHAUSTED", used, cap)
 
         st["agent_spawns"] = used + 1
         st["last_spawn_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -176,10 +176,42 @@ def main():
                       "未找到 UserPromptSubmit 写入的会话预算，已按策略默认值执行。"
                       "如需按任务定制，请确认 inject_budget.py 已注册。")
 
-    if verdict == "DENY_ZERO":
+    if verdict == "DENY_FORBIDDEN_BY_TASK":
+        # ⚠️ 3.5.14：按 state 里的 `source` 分流首句（外部复核 + 本机实测）。
+        #
+        #    修前首句恒为「agent_spawns = 0，**这是默认值**」——
+        #    但 cap 归零有三条来路，其中两条都不是默认值：
+        #      · policy-default   用户没写预算行 → 上限回落 policy 默认 0（这句对）
+        #      · prompt:explicit  用户本轮【显式写了】agent_spawns: 0
+        #      · prompt:forbid    用户在 prompt 里说了「不要派子代理」
+        #    实测：显式写 0 时，状态里 source=prompt:explicit，而报错仍说"这是默认值"。
+        #    `source` 字段本来就在 state 里（inject_budget.py 写入），无需新存储。
+        _src = ""
+        try:
+            _src = str((seed or {}).get("source") or "")
+        except Exception:
+            pass
+        if _src == "prompt:explicit":
+            _lead = ("【G1 预算门】你本轮显式声明了 agent_spawns = 0（禁止派生）。\n"
+                     "  这不是默认值，是你自己在 prompt 里写的。\n")
+        elif _src.startswith("prompt:explicit:"):
+            # ⚠️ 用户写了预算行，但写的是【别的键】（如 agent_depth）——
+            #    agent_spawns 仍是 policy 默认 0。
+            #    不能说"你显式声明了 agent_spawns = 0"，那是伪造用户原话。
+            _keys = _src.split(":", 2)[2]
+            _lead = ("【G1 预算门】本次任务禁止派生子代理（agent_spawns = 0，这是默认值）。\n"
+                     "  ⚠️ 你本轮写的是 `%s`，没写 agent_spawns —— 它仍是默认的 0。\n"
+                     "     要派子代理，请显式写一行 `agent_spawns: N`。\n" % _keys)
+        elif _src == "prompt:forbid":
+            _lead = ("【G1 预算门】你在 prompt 里说了不要派子代理。\n"
+                     "  这不是默认值，是你自己的指令。\n")
+        else:
+            _lead = ("【G1 预算门】本次任务禁止派生子代理（agent_spawns = 0，这是默认值）。\n"
+                     "  ⚠️ 若你上一轮授权过、这一轮只是没再写 —— 上限会回落到默认 0，\n"
+                     "     而已读次数【从不回退】。要续用，重写一行 `agent_spawns: N`。\n")
         deny(
-            "【G1 预算门】本次任务禁止派生子代理（agent_spawns = 0，这是默认值）。\n"
-            "  你想派：%s（%s）\n"
+            _lead
+            + "  你想派：%s（%s）\n"
             "\n"
             "  这不是能力限制，是预算限制。审计实证（73 个会话 / 15,569 条消息）：\n"
             "    · 75 次派生中，40 次（53%%）发生在子代理内部 —— 即嵌套派生\n"
@@ -196,7 +228,7 @@ def main():
             tool="Agent", session_id=data.get("session_id"),
         )
 
-    if verdict == "DENY_EXHAUSTED":
+    if verdict == "DENY_QUOTA_EXHAUSTED":
         deny(
             "【G1 预算门】Agent 预算已用尽（已读 %d / 当前上限 %d）。\n"
             "  你想派：%s（%s）\n"
