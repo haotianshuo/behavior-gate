@@ -18,7 +18,7 @@
 
 **提交前必须全部勾选：**
 
-- [ ] 154 项测试全部通过（见 [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md)）
+- [ ] 全部测试通过（见 [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md) 的测试清单与当前项数）
 - [ ] **无新增第三方依赖**（本项目只使用标准库）
 - [ ] 如改了 hook 内容，**已同步更新 `adapters/claude-code/hooks/VERSION`**
 - [ ] 已在 [CHANGELOG.md](../blob/main/CHANGELOG.md) 添加条目（含下一个可用编号）

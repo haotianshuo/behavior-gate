@@ -203,12 +203,29 @@ def main():
                      "  ⚠️ 你本轮写的是 `%s`，没写 agent_spawns —— 它仍是默认的 0。\n"
                      "     要派子代理，请显式写一行 `agent_spawns: N`。\n" % _keys)
         elif _src == "prompt:forbid":
-            _lead = ("【G1 预算门】你在 prompt 里说了不要派子代理。\n"
-                     "  这不是默认值，是你自己的指令。\n")
+            # ⚠️ 3.5.15：引用【用户实际说的片段】，不再写死。
+            #
+            #    修前文案恒为「你在 prompt 里说了不要派子代理」——
+            #    用户说「不要开后台」，门也回「你说了不要派子代理」。
+            #    那是伪造用户原话（与 :899-908 记载的事故同一类）。
+            #
+            #    片段由 inject_budget 写入 state 的 forbid_excerpt 字段。
+            #    取不到时【不编造】—— 退回不引用的说法。
+            _frag = ""
+            try:
+                _frag = str((seed or {}).get("forbid_excerpt") or "").strip()
+            except Exception:
+                pass
+            if _frag:
+                _lead = ("【G1 预算门】你在 prompt 里说了「%s」。\n"
+                         "  这不是默认值，是你自己的指令。\n" % _frag)
+            else:
+                _lead = ("【G1 预算门】你在 prompt 里表达了不要派子代理的意思。\n"
+                         "  这不是默认值，是你自己的指令。\n")
         else:
             _lead = ("【G1 预算门】本次任务禁止派生子代理（agent_spawns = 0，这是默认值）。\n"
-                     "  ⚠️ 若你上一轮授权过、这一轮只是没再写 —— 上限会回落到默认 0，\n"
-                     "     而已读次数【从不回退】。要续用，重写一行 `agent_spawns: N`。\n")
+                     "  ⚠️ 你从未在本会话里授权过派生子代理。\n"
+                     "     要派子代理，请显式写一行 `agent_spawns: N`。\n")
         deny(
             _lead
             + "  你想派：%s（%s）\n"
@@ -229,17 +246,35 @@ def main():
         )
 
     if verdict == "DENY_QUOTA_EXHAUSTED":
+        # ⚠️ 3.5.15：额度耗尽有两条来路，必须分开说。
+        #
+        #    实测踩到（我自己先写错了一版）：我原先把 inherit 分支加在
+        #    DENY_FORBIDDEN_BY_TASK 里 —— 但那条路径只在 cap == 0 时走，
+        #    而继承逻辑【永远不会继承 0】（条件要求 _prev_cap > 0）。
+        #    所以那段文案是【死代码】，永远不会显示。真正的额度耗尽走的是
+        #    这里（used >= cap）。教训：先测哪条路径会被走到，再写文案。
+        _src2 = ""
+        try:
+            _src2 = str((seed or {}).get("source") or "")
+        except Exception:
+            pass
+        if _src2.startswith("inherit:"):
+            _tail = ("  ⚠️ 这个上限是【继承】自你之前的授权（不是本轮新写的，也不是默认值）。\n"
+                     "     已读次数从不回退，所以要续用请写一个【大于 %d】的数。\n"
+                     % used)
+        else:
+            _tail = ("  ⚠️ 若「已读」大于「当前上限」，那不是超支 ——\n"
+                     "     是本轮 prompt 把上限【调低】了，而已读次数【从不回退】\n"
+                     "     （设计如此：计数只增，防止改写 prompt 刷额度）。\n"
+                     "     要拿到新额度，让用户写一个【大于已读数】的值。")
         deny(
             "【G1 预算门】Agent 预算已用尽（已读 %d / 当前上限 %d）。\n"
             "  你想派：%s（%s）\n"
             "  超出预算的唯一合法动作：停下 → 报告 → 问。\n"
             "  需要更多预算，请让用户在 prompt 里写 `agent_spawns: <更大的数>`。\n"
             "\n"
-            "  ⚠️ 若「已读」大于「当前上限」，那不是超支 ——\n"
-            "     是本轮 prompt 把上限【调低】了，而已读次数【从不回退】\n"
-            "     （设计如此：计数只增，防止改写 prompt 刷额度）。\n"
-            "     要拿到新额度，让用户写一个【大于已读数】的值。"
-            % (used, cap, who, desc),
+            % (used, cap, who, desc)
+            + _tail,
             gate_id="G1", rule_id="spawn_quota_exhausted",
             tool="Agent", session_id=data.get("session_id"),
         )
