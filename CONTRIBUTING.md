@@ -159,9 +159,12 @@ Closes #31
 ### 顺序
 
 ```text
-[ ] 1. 确认工作区干净、测试全过
-        python tests/*.py            # 455 项
-        git status --short           # 应为空
+[ ] 1. 确认工作区干净、预检全绿
+        python tools/preflight_release.py   # CI 本机等价步骤 + 全套件（一条命令）
+        git status --short                  # 应为空
+        ⚠️ preflight 是 2026-09-29 补的：v3.5.16 那次「本机跑了 455 项」，
+           但漏跑了 CI 里的检查器（check_no_deps 白名单没跟上新模块）→
+           CI 六矩阵全红、后续测试全被 SKIPPED。检查清单写进工具，比写在人脑可靠。
 
 [ ] 2. 升版本号（改 hook 就必须升）
         adapters/claude-code/hooks/VERSION
@@ -179,6 +182,13 @@ Closes #31
 [ ] 5. 打 tag（指向刚才那个提交）
         git tag -a vX.Y.Z -m "..."
         git push origin vX.Y.Z
+
+[ ] 5b. 确认 tag 的 CI 全绿（发布 Gate）
+        gh run list -R <repo> --limit 3      # 找到 tag 推送触发的 run
+        gh run watch <run-id> --exit-status  # 等它跑完；非零 = 红
+        ⚠️ tag 的 CI 是红的就不要进下一步 —— 先修，再发补丁版。
+           对照：v3.5.16 的 tag CI 是红的（31 秒即死、16 套件全被跳过），
+           而当时清单里没有这一步 —— 红灯是在发布之后才被发现的。
 
 [ ] 6. 写 Release 说明
         · 只详细写【本版新增】，旧版内容用一行链接指向旧 Release

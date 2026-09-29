@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # 发布 Gate（2026-09-29 补）：打 tag 时同样触发全套 —— 让「发布动作本身」过 CI。
+    # 背景：v3.5.16 的 tag 对应 CI 是红的（check_no_deps 白名单漂移），
+    # 而当时流程里「CI 绿」不是发布的前置 —— 红灯在发布之后才被发现。
+    # ⚠️ 已知边界（GitHub 文档）：一次推送超过 3 个 tag 时不会触发事件。
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
