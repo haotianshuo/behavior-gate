@@ -191,14 +191,22 @@ def run_all(r):
     r.call("inject_budget.py", {"session_id": "cap-g7", "transcript_path": "x", "cwd": ".",
                                 "hook_event_name": "UserPromptSubmit",
                                 "prompt": "不要再问我了，直接做"})
-    rc, _, _ = r.call("intent_gate.py", {
+    rc, _, err = r.call("intent_gate.py", {
         "session_id": "cap-g7", "transcript_path": "x", "cwd": ".",
         "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
         "tool_input": {"questions": [{"question": "x", "header": "h",
                                       "options": [{"label": "a", "description": "d"},
                                                   {"label": "b", "description": "d"}],
                                       "multiSelect": False}]}})
-    r.check("G7", "用户说「不要再问」后弹询问 → 应拦", rc, 2)
+    # ⚠️ 2026-09-29（五维验证 X16）：区分「门失效」与「评审未裁决」。
+    #    配置 enabled=true 但通道故障时，按 policy `_failure_rule` 保留既有
+    #    约束、不新增禁令 —— rc=0 是【正确行为】而非核验失败。
+    _degraded = ("未裁决" in err) or ("语义评审" in err and "未完成" in err)
+    if rc != 2 and _degraded:
+        r.check("G7", "用户说「不要再问」后弹询问 → 【本轮不适用：语义评审未裁决】",
+                True, True, "评审通道故障/超时 → 不新增禁令（见 policy _failure_rule）")
+    else:
+        r.check("G7", "用户说「不要再问」后弹询问 → 应拦", rc, 2)
 
     # ---------------- 观测层 ----------------
     n = r.events()

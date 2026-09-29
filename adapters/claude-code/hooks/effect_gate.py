@@ -24,6 +24,7 @@ G3 生效门 · 执行端（Stop；SubagentStop【未注册】）
    ——说白了，人还是最后一道防线。
 """
 
+import bisect
 import os
 import re
 import sys
@@ -152,7 +153,14 @@ BARE_UNVERIFIED_RX = re.compile(
 #    判据：字段名 + 冒号 + 空值（无 / 没有 / 无此项 / none / - / 空）
 #          = 该行陈述的是「没有未验证项」，不构成"承认有未验证"。
 NEGATED_UNVERIFIED_RX = re.compile(
-    r"^[\s\-*•>#]*(\b未验证项\b|\b未验证内容\b|\b未验证的?\b|未实测项|"
+    # ⚠️ 审计修复（2026-09-29，五维验证 X8）：去掉【行首锚定】。
+    #    修前 `^[\s\-*•>#]*` 要求字段名在行首（允许列表/标题符号前缀），
+    #    于是「已完成，**未验证项**：无」（字段在【行中】）失配 →
+    #    被判"承认有未验证" → 与完成宣言判成自相矛盾 → 误拦（实测 rc=2；
+    #    同内容把字段挪到独占一行 → rc=0）—— 判定随排版而变。
+    #    修法：行内匹配（调用处 .match → .search）。
+    #    BARE_UNVERIFIED_RX 保持"独占行"语义不变（两处职责分离）。
+    r"[\s\-*•>#]*(\b未验证项\b|\b未验证内容\b|\b未验证的?\b|未实测项|"
     r"unverified(\s+items?)?|not\s+verified\s+items?)"
     # ⚠️ 审计修复（2026-09-29）：字段名后必须容忍 markdown 粗体闭合（`**`）。
     #    修前 `\s*[:：]` 直接跟在字段名后，而「**未验证项**：无」在
@@ -160,7 +168,16 @@ NEGATED_UNVERIFIED_RX = re.compile(
     #    「承认有未验证」→ 与完成宣言判成自相矛盾 → 误拦（实测 rc=2；
     #    同内容列表项写法 `- 未验证项：无` rc=0 —— 判定随排版而变）。
     #    本门模板自己推广的写法就是粗体（`**未验证项**`），照写的用户被罚。
-    r"[ \t]*\**[ \t]*[:：][ \t]*\**[ \t]*(无|没有|无此项|暂无|none|n/?a|-|—|\s)*$",
+    # ⚠️ 审计修复（2026-09-29，批 2 三验 FAIL 3/4）：容忍【句末标点】。
+    #    修前 `…(无|没有|…|\s)*$` 不认「：无。」—— 句号让 $ 失配 →
+    #    该行被判"承认有未验证" → 与完成宣言判成自相矛盾 → 误拦。
+    #    实测（旧版/新版一致，属既有缺口）：`**未验证项**：无。` rc=2，
+    #    去掉句号 rc=0 —— 判定随句末标点而变（#43/X8 同族：排版敏感）。
+    #    正负向裁定（技术总监，2026-09-29）：**正向** —— 消除误拦；
+    #    误伤面核查：`未验证项：没有测试`（"没有"后接实词）/`未验证项：无需处理`
+    #    仍失配（`$` 前有实词）→ 不会把真值误判成"无"。
+    r"[ \t]*\**[ \t]*[:：][ \t]*\**[ \t]*(无|没有|无此项|暂无|none|n/?a|-|—|\s)*"
+    r"[。.；;!！，,]*$",
     re.I)
 
 # 证据级别。
@@ -244,9 +261,14 @@ def _lowest_asserted_level(text):
         会被按 L1 从严 —— 属误报侧、可见、可改为按模板写声明位。
     """
     best = None
+    bounds = _clause_bounds(text)
+    neg_spans = _negation_spans(NEGATED_LEVEL_CTX, text)
     for m in LEVEL_FALLBACK_RX.finditer(text):
-        seg_start = _clause_start(text, m.start())
-        if NEGATED_LEVEL_CTX.search(text[seg_start:m.start()]):
+        seg_start = _clause_start(bounds, m.start())
+        # ⚠️ X9（批 2 三验）：从"逐次线性 search/切片"改为"预计算 + 二分"。
+        #    曾试过 search(text, pos, endpos)（避免切片）——切片没了，但每次
+        #    搜索仍从 pos 扫到 endpos，Θ(n²) 不变（实测 19.57s → 19.55s）。
+        if _last_negation_in(neg_spans, seg_start, m.start()) is not None:
             continue
         lv = m.group(1).upper()
         if best is None or LEVEL_NUM[lv] < LEVEL_NUM[best]:
@@ -406,8 +428,16 @@ def analyze(msg):
 #    它含「报告 / 文档 / 说明 / 参考 / 建议」——那些在【报告工作】时
 #    会合法出现（"我写了报告，已完成"），用在 G3 会把真宣言也剥掉。
 #    G1 用它是对的（预算声明确实不该出现在"文档/说明"里），场景不同。
+# ⚠️ 审计修复（2026-09-29，批 2 三验新发现，技术总监裁定：正向修复）：
+#    「计划」本意是标记【未来语态】("计划是修复完成后再通知")，但它是
+#    兼类词 —— 作【名词主语】时是宣布，不是未来语境：
+#        「还没看，但计划已完成了。」
+#    （3.5.13 列出的 5 个误放行案例之一，当年未修干净；实测旧版/新版一致 rc=0）
+#    修法：只保留未来语态用法 ——「计划」后必须紧跟 是/要/将/会。
+#    代价（如实登记）："计划完成后通知"这类省略句会从"静默漏拦"转为
+#    "可见误拦"——方向与项目「宁可多拦（可见）/不可静默漏报」的取舍一致。
 _NEG_BASE = (r"(不认为|不觉得|算不上|谈不上|不要|别写|别说|不能写|"
-             r"计划|打算|将要|即将|如果|假如|一旦|"
+             r"计划(?=[是要将会])|打算|将要|即将|如果|假如|一旦|"
              r"尚未|还没|没有|无法|未能|不应该|不用)")
 
 # 声明丢弃路径专用（_drop_negated_claims）：基础词表 —— 刻意【不含】「未/没+动词」。
@@ -468,18 +498,49 @@ NEGATED_LEVEL_CTX = re.compile(
 CLAUSE_BOUNDARY = re.compile(r"[，,。.；;：:！!？?、\n]|但|不过|然而|可是|所以|因此")
 
 
-def _clause_start(text, pos):
-    """pos 之前最后一个子句边界的终点；没有边界则 0。
+def _clause_bounds(text):
+    """预计算子句边界终点列表（升序）。一次 O(n)。
 
-    ⚠️ 简化审查（2026-09-29）：级别语境过滤（_lowest_asserted_level）与声明
-    否定剔除（_drop_negated_claims）此前各写一份同形循环 —— 提取为单一实现。
-    行为等价：对同一 (text, pos)，原循环的最后一次赋值即 end() 最大且
-    end() <= pos 的边界；本函数返回同一个值。
+    ⚠️ 审计修复（2026-09-29，五维验证 X9）：原 `_clause_start(text,pos)` 每次
+    都从 0 扫到 pos，而 `_drop_negated_claims`（每个完成词命中一次）与
+    `_lowest_asserted_level`（每个级别命中一次）都要查 —— 合计 Θ(n²)。
+    实测 padding 攻击（红队）：40000 个「已完成。」> 60s 被子进程杀死；
+    宿主 Stop timeout 30s → 杀 hook = 无 deny、无 stderr = **门静默不执行**
+    （本项目定义的最严重缺陷形状）。修法：一次建表 + 二分查询。
     """
-    seg_start = 0
-    for b in CLAUSE_BOUNDARY.finditer(text, 0, pos):
-        seg_start = b.end()
-    return seg_start
+    return [b.end() for b in CLAUSE_BOUNDARY.finditer(text)]
+
+
+def _negation_spans(rx, text):
+    """预计算某否定词表在全文的匹配区间（升序）。一次 O(n)。
+
+    ⚠️ X9 第三轮（批 2 三验）：原逐次 `rx.search(text, seg_start, m.start())`
+    在【无子句边界的长文本】里每次从 seg_start 扫到 endpos → 仍是 Θ(n²)。
+    Profile 实测（12000×「L1 」，36000 字符）：12004 次 search 占 19.33s，
+    其余全部函数合计 <0.2s —— 瓶颈就在这里。
+    """
+    return [(x.start(), x.end()) for x in rx.finditer(text)]
+
+
+def _last_negation_in(spans, start, end):
+    """spans 中落在 [start, end) 内的最后一个；没有则 None。O(log n)。
+
+    "最后一个" = 离目标词最近的那个（_drop_negated_claims 的既有语义）。
+    """
+    j = bisect.bisect_left(spans, (end,)) - 1
+    if j >= 0 and spans[j][0] >= start:
+        return spans[j]
+    return None
+
+
+def _clause_start(bounds, pos):
+    """pos 之前最后一个子句边界的终点；没有边界则 0。O(log n)。
+
+    bounds 必须由 _clause_bounds(text) 预计算（升序、同一次文本）。
+    语义与旧版一致：返回 end() 最大且 <= pos 的边界终点。
+    """
+    i = bisect.bisect_right(bounds, pos) - 1
+    return bounds[i] if i >= 0 else 0
 
 
 # 引用性定语（3.5.14 补，本机实测坐实 —— BG06 的第三个现场）。
@@ -500,6 +561,41 @@ def _clause_start(text, pos):
 _ATTR_AFTER_RX = re.compile(r"\s*(过\s*的|的(?![，,。.；;：:！!？?]|$))")
 
 
+# ---- 否定作用域的「封闭标记」（2026-09-29 五维验证 X7）----
+#
+# 借鉴 NegEx/ConText（临床 NLP 的否定检测）的结构：否定词的作用域应由
+# 【触发词 + 作用域终止符】界定，而不是"所在小句内出现否定词就整条否定"。
+# NegEx 的 pseudo_negation（假触发词）概念正对本处漏拦：
+#     「无法复现的那条已修复」——「无法」修饰宾语「复现的那条」，
+#     不作用于后面的断言「已修复」，但旧判据整条剔除 → 静默放行（rc=0）。
+# 机械判据（不需要句法分析）：
+#   · 否定词与完成词之间出现「的」→ 否定被锁在定语里（修饰宾语），
+#     断言在后 → 不剔除；
+#   · 否定词是条件词（如果/假如/…）且其后出现主句起首标记（那/则）
+#     → 条件从句结束、主句开始 → 不剔除。
+# 代价（如实登记）：含「的」的真否定句（「我不认为它的问题已修复」）
+#   会被判成"不剔除"→ 误拦（可见、可纠正）；方向与项目
+#   「宁可多拦（误报可见）/不可静默漏报」的既定取舍一致。
+_SCOPE_CLOSER_RX = re.compile(r"的")
+_COND_WORDS = ("如果", "假如", "一旦", "若", "要是")
+_MAIN_CLAUSE_RX = re.compile(r"那|则")
+
+
+def _negation_scope_closed(span, text, end):
+    """否定词 span 的作用域是否在 [span.end, end) 之间被封闭。
+
+    返回 True = 否定不作用于其后的完成词（否定修饰的是宾语/从句）。
+    span = (start, end)（来自 _negation_spans）。
+    ⚠️ 用 search(text, pos, endpos) 而不是先切片（见 X9 说明）。
+    """
+    s = span[1]
+    if _SCOPE_CLOSER_RX.search(text, s, end):
+        return True
+    if text[span[0]:span[1]] in _COND_WORDS and _MAIN_CLAUSE_RX.search(text, s, end):
+        return True
+    return False
+
+
 def _drop_negated_claims(text, rx):
     """剔除【处在否定/未来/条件语境】或【作定语引用】的完成词匹配。
 
@@ -512,13 +608,19 @@ def _drop_negated_claims(text, rx):
 
     判据（3.5.14 补充）：完成词后紧跟"的/过的"且后面还有实词 → 定语引用，
     不是断言（见 _ATTR_AFTER_RX 的说明）。
+
+    判据（X7 修正，2026-09-29 五维验证）：同小句还不够 —— 否定词与完成词
+    之间若出现作用域封闭标记（见 _negation_scope_closed），说明否定修饰的
+    是宾语/从句，不作用于完成词。取【最后一个】否定词判断（最近的才相关）。
     """
     out = []
+    bounds = _clause_bounds(text)
+    neg_spans = _negation_spans(NEGATED_CLAIM_CTX, text)
     for m in rx.finditer(text):
         # 往前看一个从句（到最近的边界为止），在其中找否定词
-        seg_start = _clause_start(text, m.start())
-        before = text[seg_start:m.start()]
-        if NEGATED_CLAIM_CTX.search(before):
+        seg_start = _clause_start(bounds, m.start())
+        neg = _last_negation_in(neg_spans, seg_start, m.start())
+        if neg is not None and not _negation_scope_closed(neg, text, m.start()):
             continue
         # 往后看：紧跟定语标记且其后还有实词 → 可能是定语，不算宣布
         #
@@ -544,7 +646,9 @@ def _drop_negated_claims(text, rx):
             r"这与|那与|前面|先前|此前|之前|上述|前述|已知)")
         after = text[m.end():m.end() + 40]
         am = _ATTR_AFTER_RX.match(after)
-        if am and _REF_CTX.search(before[-16:]):
+        # ⚠️ X9 第二轮：原 `before[-16:]` 须先构造 before（大切片）——
+        #    改为带 pos/endpos 的 search，语义等价（before 的最后 16 字符）。
+        if am and _REF_CTX.search(text, max(seg_start, m.start() - 16), m.start()):
             # 定语标记后面还有内容，说明它在修饰某物：
             #   · 实词（汉字/字母/数字）→ "已验证的结论"
             #   · 引号/书名号开头的引用    → "已验证的「写在正文里照样复现」"
@@ -579,11 +683,19 @@ def _strip_quoted_context(text):
     if not text:
         return ""
     t = text
+    # ⚠️ 审计修复（2026-09-29，五维验证 X10）：与 _lib.strip_referenced_text
+    #    同步扩范围（两份同形实现必须一起改，否则又是"只修一侧"）：
+    #    `~~~` 围栏（CommonMark 合法围栏字符）/ HTML 注释 / 4 空格缩进代码块 /
+    #    长引号去 200 上限。实测（红队）：`~~~\n已完成\n~~~`、`<!-- 已完成 -->`、
+    #    210 字引号此前 rc=2 误拦（同内容放反引号里 rc=0）。
     t = re.sub(r"```.*?```", " ", t, flags=re.S)          # 围栏代码块
+    t = re.sub(r"~~~.*?~~~", " ", t, flags=re.S)           # 波浪号围栏（X10）
+    t = re.sub(r"<!--.*?-->", " ", t, flags=re.S)          # HTML 注释（X10）
+    t = re.sub(r"^[ \t]{4,}.*$", " ", t, flags=re.M)       # 缩进代码块（X10）
     t = re.sub(r"`[^`\n]*`", " ", t)                       # 行内代码
-    t = re.sub(r"\"[^\"\n]{0,200}\"", " ", t)              # 英文双引号
-    t = re.sub(r"[“”][^“”\n]{0,200}[“”]", " ", t)          # 中文双引号
-    t = re.sub(r"[「『][^」』\n]{0,200}[」』]", " ", t)      # 中文书名/引号
+    t = re.sub(r"\"[^\"\n]*\"", " ", t)                    # 英文双引号（X10：去上限）
+    t = re.sub(r"[“”][^“”\n]*[“”]", " ", t)                # 中文双引号（X10：去上限）
+    t = re.sub(r"[「『][^」』\n]*[」』]", " ", t)            # 中文书名/引号（X10：去上限）
     # ⚠️ 3.5.16 第四轮：【曾加过"括号内一律按引用剥离"，已撤销】。
     #
     #    那一版的意图是让 real_03 的「（已完成 + 未验证生效）」被当成用例名。
@@ -721,8 +833,9 @@ def _has_binding_unverified(text):
             continue
         if BARE_UNVERIFIED_RX.match(line.strip()):
             continue        # 光秃秃的免责声明，不构成声明
-        if NEGATED_UNVERIFIED_RX.match(line.strip()):
+        if NEGATED_UNVERIFIED_RX.search(line.strip()):
             continue        # 「未验证项：无」= 否定，不是"承认有未验证"（#43）
+                            # X8：search（行内位置）而非 match（行首）
         return True
     return False
 
@@ -1108,6 +1221,14 @@ def main():
     #    而"已验证的声明"仍由 has_block + level 检查保护。
     if claim and not claim_from_semantic \
             and not _drop_negated_claims(asserted, CLAIM_RX):
+        # ⚠️ X7（2026-09-29 五维验证）：剔除导致放行【也必须留痕】——
+        #    红队实测这类静默放行在事后统计里完全不可见（无 stderr、无事件），
+        #    违反本项目「静默失败 = 门不存在」的原则。事件与
+        #    stop_feedback_retry 同模式：记录"门检查了但放行了"，
+        #    便于事后按 rule_id 统计"否定剔除导致放行"的发生率。
+        record_gate_event("G3", "claim_dropped_negated",
+                          "allow_by_negation_filter",
+                          tool="Stop", session_id=data.get("session_id"))
         allow()
 
     if not claim:

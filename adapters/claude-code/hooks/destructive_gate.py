@@ -53,7 +53,17 @@ from _lib import read_input, deny, allow, load_policy, warn_inactive  # noqa: E4
 #   两个 lookahead 的分工：
 #     (?=...)  确认选项序列里确实有 r/R（否则 rm -f / 会被误拦）
 #     (?:...)  吃掉完整的选项序列，让后面的路径锚定生效
-_RM_OPTS = (r"(?=(?:-{1,2}\S+\s+)*-\S*[rR]\S*\s)"   # 必须含递归标志
+# 「递归标志」的精确认定（2026-09-29 五维验证 X3 的交叉验证第三遍修正）。
+#   ⚠️ 修前用 `-\S*[rR]\S*` —— 它把【长选项里的 r】也当成递归标志：
+#      `rm --verbose /` 里的 "verb**o**se"… 准确说 `-\S*[rR]\S*` 命中 `--verbose`
+#      中段的 r → 误判为递归强删（实测：`rm --verbose /` 被 G5 拦）。
+#      而 GNU 长选项不会拆解，--verbose 不含递归语义 → 是误拦。
+#   判据（与 getopt 语义对齐）：
+#     · 单横线短选项组合：getopt 会把 `-verbose` 拆成 -v -e -r …，含 r/R 即递归
+#       → 保留 [rR] 判定（`rm -verbose /` 真的递归，拦是对的）
+#     · 双横线长选项：只认 --recursive（含 GNU 缩写前缀 --rec/--recu/…）
+_RM_RECURSIVE_OPT = r"(?:-[^-]*[rR]\S*|--rec[a-z]*)"
+_RM_OPTS = (r"(?=(?:-{1,2}\S+\s+)*" + _RM_RECURSIVE_OPT + r"\s)"   # 必须含递归标志
             r"(?:-{1,2}\S+\s+)+")                    # 吃掉全部选项
 # 结尾锚定：恰好是根。
 #
@@ -69,7 +79,43 @@ _RM_OPTS = (r"(?=(?:-{1,2}\S+\s+)*-\S*[rR]\S*\s)"   # 必须含递归标志
 #    `rm -rf ~/`、`rm -rf $HOME/` 漏拦（v12 三验实跑 3 例 rc=0，且回溯确认
 #    v3.5.0 起就存在）。与"子句起点"提取同款：同一个判据只应有一个出处。
 _ROOT_EQ_TAIL = r"[\\/\.\"'”’]*"                 # 根目标后的尾随 斜杠/点/引号
-_RM_ROOT_TAIL = _ROOT_EQ_TAIL + r"(\s|$|\*)"     # 执行侧：尾随 + 空白/行尾/通配
+# ⚠️ 审计修复（2026-09-29，五维验证 X2）：结束集补 shell 命令结束符。
+#    修前只认 (\s|$|\*) —— 根目标后紧跟 `;` `|` `&` `)` `>` `<` 或重定向
+#    （`/2>/dev/null`）时整条失配。实测（红队 + 交叉复现）全漏拦：
+#        rm -rf /;echo x / rm -rf /|cat / rm -rf /&echo x / rm -rf /2>/dev/null
+#        / $(rm -rf /) / rm -rf /) / rm -rf /> / rm -rf /<
+#    守门条件不变：紧随目标的首字符若是普通字符（/tmp 的 t）仍必须失配
+#    —— `/tmp/build` 这类正常清理继续放行（回归由 t2 用例守住）。
+#    刻意【不】把 `,` `:` 加进结束集：它们在 shell 里不是元字符，
+#    `rm -rf /,x` 的目标是 /,x（不是根），放行是正确行为。
+_RM_ROOT_TAIL = _ROOT_EQ_TAIL + r"(\s|$|\*|[;&|)(<>]|\d*[<>])"
+# ---- 共享的「根目标集合」（X5）----
+# ⚠️ 审计修复（2026-09-29，五维验证 X5）：尾缀片段已共享（_ROOT_EQ_TAIL），
+#    但【目标集合】没有共享 —— 执行侧 9 种、写入侧只有 3 种，于是写入侧
+#    `rm -rf ${HOME}` / `$TEMP` / `*` 全漏拦（执行侧同串 rc=2）。
+#    这正是本项目 #19/#38 的失败形状（同一判据只在一侧修好）。
+#    现在两侧共用同一个目标片段 —— 改这里 = 两侧同时改。
+_ROOT_TARGETS = (r"[\"']?(/|~|\$HOME|\$\{HOME\}|\$\{TEMP\}|\$TEMP|\$TMP|"
+                 r"\$\{USERPROFILE\}|\$USERPROFILE|"
+                 r"\$env:(?:TEMP|TMP|USERPROFILE)|"
+                 r"%TEMP%|%TMP%|%USERPROFILE%|\*)")
+# ---- MSYS / Git Bash 盘根（X1）----
+# `cygpath -w /d/` → `D:\`；`/d/`、`/cygdrive/d/`、`//d/` 都是 D: 盘根。
+# 盘符字母不在 _ROOT_EQ_TAIL 的字符类里 → 旧规则整条失配（最高危漏拦）。
+_MSYS_DRIVE = r"/{1,2}(?:cygdrive/)?[A-Za-z]/{0,2}"
+# ---- 写入内容的「命令位」前缀（X5/X6）----
+# ⚠️ 审计修复（2026-09-29，五维验证 X5/X6）：行首锚定的两处扩展 ——
+#   ① X6：容忍 Jupyter/ipykernel 的 shell 转义前缀 `!`。
+#      `!rm -rf /` 这一行在 ipykernel 里【真会执行】，而 `^[ \t]*\brm` 在
+#      `!` 前缀形态下失配（实测 NotebookEdit new_source rc=0，同内容的
+#      裸 rm 行 rc=2）。
+#   ② X5：允许命令连接符（; & |）之后开始的新命令位。
+#      `echo ok && rm -rf /` 作为整行内容此前不命中（rm 不在行首）；
+#      连接符后确实是命令位，与执行侧的判据对齐。
+#    误拦面：文档里"……；rm -rf / 很危险"这类句中引用会被拦 ——
+#    属可接受的保守方向（与行锚定既有取舍一致：宁可漏拦的是"讨论文本"，
+#    不可放行的是"可执行命令"）。
+_CONTENT_CMD_POS = r"(?:^[ \t]*!?[ \t]*|[;&|][ \t]*)"
 
 
 # ---- MCP 字段名 → 规则集 的显式名单（3.5.10 / #53）----
@@ -194,9 +240,7 @@ CMD_DENY = [
         # 修前：`rm -rf /tmp/v350` 误拦（前缀贪婪），`rm -r -f /` 与 `rm -Rf /` 漏拦。
         # 3.5.18（审计 2026-09-29）：目标组补 ${HOME}/${TEMP}/$TEMP/%TEMP% 等价写法，
         #   尾锚定容忍尾随斜杠/点/引号（见 _RM_ROOT_TAIL 注释）。
-        "pattern": (r"\brm\s+" + _RM_OPTS +
-                    r"[\"']?(/|~|\$HOME|\$\{HOME\}|\$\{TEMP\}|\$TEMP|%TEMP%|%TMP%|\*)"
-                    + _RM_ROOT_TAIL),
+        "pattern": (r"\brm\s+" + _RM_OPTS + _ROOT_TARGETS + _RM_ROOT_TAIL),
         "why": "递归强删根目录/家目录/通配。\n"
                "  只匹配【目标恰好是根】的情况 ——\n"
                "  `rm -rf /tmp/build` 这类正常清理不会被拦。",
@@ -216,11 +260,42 @@ CMD_DENY = [
         "instead": "写出完整、具体的最终路径（不带 .. 段），并先 `ls` 确认目标。",
     },
     {
+        "id": "rm_rf_msys_drive",
+        # 审计新增（2026-09-29，五维验证 X1）：Git Bash / MSYS 下的盘根写法。
+        #   cygpath -w /d/ → D:\ ；`rm -rf /d/` 就是删掉整个 D 盘。
+        #   3.5.10 给 rm_rf_traversal 补尾锚定后，盘符字母（d）不在容忍字符类
+        #   → 整条失配；与此同时 rm_rf_windows_drive 注释里"被 /d/ 拦住是巧合"
+        #   的那份保护也一并丢失（本次已同步改注释）。
+        #   只拦【盘根】本身（/d/、/d、/c/、/cygdrive/d/、//d/）；
+        #   /d/myproj/build 这类更深路径照常放行（与 rm_rf_windows_drive 同取舍）。
+        "pattern": (r"\brm\s+" + _RM_OPTS +
+                    r"[\"']?" + _MSYS_DRIVE + r"[\"']?" + _RM_ROOT_TAIL),
+        "why": "递归强删 Git Bash / MSYS 的盘根（/d/ 等价于 D:\\）。\n"
+               "  实测：`rm -rf /d/` 此前放行 —— 在 Windows 上等于删掉整个 D 盘。",
+        "instead": "写出完整的具体路径（如 /d/myproj/build），并先 `ls` 确认目标。",
+    },
+    {
+        "id": "rm_root_opt_after",
+        # 审计新增（2026-09-29，五维验证 X3）：GNU 选项置换。
+        #   `rm / -rf` 与 `rm -rf /` 完全等价（红队在本机 scratch 目录实测
+        #   真删成功：rm _states/perm/keep -rf 递归强删生效）。
+        #   既有规则的 _RM_OPTS 要求选项出现在目标【之前】→ 后置形态全部失配。
+        #   判据：根目标之后又出现含 r/R 的选项。
+        "pattern": (r"\brm\s+[\"']?(/|~|\$HOME|\$\{HOME\})[\\/\.\"'”’]*[\"']?"
+                    r"(\s+[^-]\S*)*\s+" + _RM_RECURSIVE_OPT + r"\b"),
+        "why": "递归强删根/家目录，但选项写在目标之后（`rm / -rf`）——\n"
+               "  GNU coreutils 会置换选项位置，与本文件其他规则拦的写法等价。\n"
+               "  实测：`rm / -rf`、`rm ~ -rf` 此前全部放行，且真会执行删除。",
+        "instead": "写出完整、具体的路径，并先 `ls` 确认目标。",
+    },
+    {
         # 3.5.9 新增（#44）。外部复核实测：本机是 Windows 11，
         # 而上面那条规则只认 POSIX 根（/ ~ $HOME *），于是
         #     rm -rf D:/   /  rm -rf C:/   /  rm -rf C:/Users/<用户>
         # 全部【放行】—— 在 Windows 上等于没有保护。
-        # 被 /d/... 拦住是巧合（它以 / 开头），不是设计了 Windows 支持。
+        # 被 /d/... 拦住曾【是巧合】（它以 / 开头），不是设计了 Windows 支持 ——
+        # ⚠️ 该巧合保护在 3.5.10 补尾锚定时丢失（/d/ 不再被拦住，实测 rc=0），
+        #    现由 rm_rf_msys_drive 显式覆盖（2026-09-29 五维验证 X1）。
         "id": "rm_rf_windows_drive",
         # 3.5.10 修复（#48）：与 rm_rf_traversal 共用选项解析片段。
         # 修前同样漏 `rm -r -f D:/` 与 `rm -Rf D:/`。
@@ -297,12 +372,38 @@ CONTENT_DENY = [
         #    补上两类此前只存在于执行侧的等价写法：尾随斜杠（rm -rf ~/）
         #    与包裹引号（rm -rf "$HOME"）。仍然要求【独占整行】（^ 锚定），
         #    句中提及照旧放行 —— 与同列表既有取舍一致。
-        "pattern": (r"^[ \t]*\brm\s+" + _RM_OPTS +
-                    r"[\"']?(/|~|\$HOME)" + _ROOT_EQ_TAIL +
+        "pattern": (_CONTENT_CMD_POS + r"\brm\s+" + _RM_OPTS +
+                    _ROOT_TARGETS + _ROOT_EQ_TAIL +
                     r"(\s|$|--no-preserve-root)"),
         "line_anchored": True,
         "why": "写入的内容里，有一【整行】是递归强删根目录——这段内容一旦被当成脚本执行就会出事。",
         "instead": "如果这是在写文档/注释，把该模式放在句子中间或加转义（如「禁止 rm -rf / 这类命令」），避免独占一行。",
+    },
+    {
+        "id": "rm_rf_dotdot_in_content",
+        # 审计新增（2026-09-29，五维验证 X4）：执行侧 rm_rf_dotdot_root 的镜像。
+        #   修前 dotdot 规则只挂在 CMD_DENY（"只修一侧"的又一次复发）：
+        #       Write 内容整行 `rm -rf /tmp/../` → rc=0（同串走 Bash rc=2，3/3 例）
+        #   判据与执行侧完全同形（/、~、$HOME 开头且以 .. 段结尾 = 规范化后到根），
+        #   只是落回写入侧的行锚定语义（独占整行/命令位）。
+        "pattern": ((r"(?:^[ \t]*!?[ \t]*|[;&|][ \t]*)\brm\s+" + _RM_OPTS +
+                     r"[\"']?(/|~|\$HOME)[^\s\"']*/\.\.([\\/]\.\.)*[\\/]?[\"']?\s*$")),
+        "line_anchored": True,
+        "why": "写入的内容里，有一整行是【规范化后到达根】的递归强删（…/../）——\n"
+               "  这段内容一旦被当成脚本执行就会删根。",
+        "instead": "写出完整、具体的最终路径（不带 .. 段），并先 `ls` 确认目标。",
+    },
+    {
+        "id": "rm_rf_msys_drive_in_content",
+        # 审计新增（2026-09-29，五维验证 X1）：MSYS 盘根在执行侧与写入侧
+        #   一并覆盖（/d/ 是 POSIX 形态的删盘根，不属于 R2 那条"盘符 D:/
+        #   写入侧不拦"的已声明边界）。
+        "pattern": ((r"(?:^[ \t]*!?[ \t]*|[;&|][ \t]*)\brm\s+" + _RM_OPTS +
+                     r"[\"']?" + _MSYS_DRIVE + r"[\"']?" + _RM_ROOT_TAIL)),
+        "line_anchored": True,
+        "why": "写入的内容里，有一整行是递归强删 Git Bash 盘根（/d/ = D:\\）——\n"
+               "  这段内容一旦被当成脚本执行就会删掉整个盘。",
+        "instead": "如果是在写文档，把该模式放在句子中间或改用占位路径。",
     },
     {
         "id": "fork_bomb",
@@ -311,7 +412,7 @@ CONTENT_DENY = [
         #    本会话真实发生两次 —— 写审计报告引用该字面量被本门拦下）。
         #    判据与同列表的 rm_rf_in_content 完全同形：独占整行（允许缩进）
         #    才拦，作为被讨论的文本放行。执行侧 CMD_DENY 保持全文匹配（有意保守）。
-        "pattern": r"^[ \t]*" + _FORK_BOMB_PAT,
+        "pattern": _CONTENT_CMD_POS + _FORK_BOMB_PAT,
         "line_anchored": True,
         "why": "Fork bomb。",
         "instead": "不要写这个。",
@@ -319,7 +420,7 @@ CONTENT_DENY = [
     {
         "id": "disk_overwrite",
         # ⚠️ 审计修复（2026-09-29）：同上，补行首锚定（AGENTS.md 约束 3）。
-        "pattern": r"^[ \t]*" + _DISK_OVERWRITE_PAT,
+        "pattern": _CONTENT_CMD_POS + _DISK_OVERWRITE_PAT,
         "line_anchored": True,
         "why": "直接覆写块设备。",
         "instead": "如果是文档示例，标注清楚并改用占位路径。",
@@ -451,8 +552,13 @@ def main():
         #    那正是本项目要消灭的"静默"形状。
         #
         #    修法：Bash 的 command 同时过 cmd_rules（deny）与 warn_rules（警告）。
-        targets = [("command", ti.get("command") or "", cmd_rules),
-                   ("command", ti.get("command") or "", warn_rules)]
+        # ⚠️ 审计修复（2026-09-29，五维验证 X15）：command 非字符串时
+        #    此前直接进 rx.search → TypeError → 顶层兜底 fail-open（rc=0）。
+        #    MCP 通道早有 _to_matchable 做容器归一，Bash 通道没有 ——
+        #    又是"只在一侧修好"。现统一走 _to_matchable（None → ""，
+        #    list → argv 语义拼接，标量 → str）。
+        targets = [("command", _to_matchable(ti.get("command")), cmd_rules),
+                   ("command", _to_matchable(ti.get("command")), warn_rules)]
     elif tool.startswith("mcp__"):
         # 逐字段取真实值，而不是 repr(整体) —— 让锚定在 MCP 通道同样成立。
         # 但【不】把两套规则混用：命令类字段 → cmd_rules，

@@ -948,11 +948,26 @@ def strip_referenced_text(text):
     if not text:
         return ""
     t = text
+    # ⚠️ 审计修复（2026-09-29，五维验证 X10）：补三类引用形态（按 CommonMark
+    #    规范实核，见 spec.commonmark.org §fenced code blocks / §indented code blocks）：
+    #    ① `~~~` 围栏：规范规定围栏可用 backtick **或 tilde**（至少 3 个、不能混用）
+    #       —— 修前只认 ``` → 波浪号围栏里的 `agent_spawns: 9` 被当成真实声明
+    #       （实测：cap 凭空抬到 9，并通过继承在整个会话持续生效）。
+    #    ② HTML 注释 `<!-- ... -->`（Markdown 内联 HTML，同为"被讨论的文本"）。
+    #    ③ 4 空格缩进代码块（规范 indented code block）。
+    #    ④ 长引号：去掉 200 字上限（保留单行配对限制）—— 红队实测 230 字引号逃逸。
+    #    已知边界（有意保留，如实登记）：未闭合围栏【不】剥离到文档尾
+    #    （规范规定"未闭合代码块由文档结尾闭合"）—— 那会大幅扩大剥离面，
+    #    把"正文里一个孤立 ~~~"之后的所有真声明都吞掉；本次只处理成对围栏
+    #    （红队实测的攻击形态即为成对）。
     t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    t = re.sub(r"~~~.*?~~~", " ", t, flags=re.S)
+    t = re.sub(r"<!--.*?-->", " ", t, flags=re.S)
+    t = re.sub(r"^[ \t]{4,}.*$", " ", t, flags=re.M)
     t = re.sub(r"`[^`\n]*`", " ", t)
-    t = re.sub(r"\"[^\"\n]{0,200}\"", " ", t)
-    t = re.sub(r"[“”][^“”\n]{0,200}[“”]", " ", t)
-    t = re.sub(r"[「『][^」』\n]{0,200}[」』]", " ", t)
+    t = re.sub(r"\"[^\"\n]*\"", " ", t)
+    t = re.sub(r"[“”][^“”\n]*[“”]", " ", t)
+    t = re.sub(r"[「『][^」』\n]*[」』]", " ", t)
     t = re.sub(r"^[ \t]*>.*$", " ", t, flags=re.M)
     return t
 

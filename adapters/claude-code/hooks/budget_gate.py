@@ -66,6 +66,17 @@ def main():
                   "source": "fallback-no-inject",
                   "agent_spawns": 0}
         b = st.get("budget") or fallback
+        # ⚠️ 审计修复（2026-09-29，五维验证 X14）：容器类型校验。
+        #    修前若 budget 是 truthy 非 dict（`"0"` / `[]` / `123`）→ `b.get`
+        #    抛 AttributeError → 顶层兜底 fail-open（rc=0，且计数永不增长）。
+        #    而同一文件里 `budget.agent_spawns="3"` → CAP_INVALID 保守拒绝 ——
+        #    三种损坏、两种相反方向。按「不可信 = 配额不可信」的既有语义
+        #    （对照 CAP_INVALID 分支）统一为**保守拒绝**。
+        #    依据（与项目既有取舍同向）：预算是不允许超的语义，读不出来时
+        #    放行等于放弃配额。原则出处：Saltzer & Schroeder, "Fail-safe defaults"
+        #    —— 保护机制无法作出判定时应拒绝，而非放行。
+        if not isinstance(b, dict):
+            return st, ("CAP_INVALID", 0, 0)
 
         # BUG-2 修复：上限值必须经类型校验。
         # 修前 `int(b.get("agent_spawns", 0))` 在遇到字符串/null/数组时

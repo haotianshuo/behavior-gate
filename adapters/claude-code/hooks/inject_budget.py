@@ -64,7 +64,13 @@ def main():
                                   "prompt:explicit")
     if not _spawns_declared:
         _prev_src = str(prev.get("source") or "")
-        _prev_cap = (prev.get("budget") or {}).get("agent_spawns")
+        # ⚠️ 审计修复（2026-09-29，五维验证 X14 同族）：prev["budget"] 若是
+        #    truthy 非 dict（状态损坏），`.get` 会抛 AttributeError 并把
+        #    整个 hook 打断。这里按"读不出 = 不继承"处理（继承只放宽、不收紧，
+        #    读不出时不继承是保守方向；收紧侧的 CAP_INVALID 由 budget_gate 管）。
+        _prev_budget = prev.get("budget")
+        _prev_cap = (_prev_budget.get("agent_spawns")
+                     if isinstance(_prev_budget, dict) else None)
         # ⚠️ 必须同时接受 `inherit:` 前缀 —— 否则链只延续一轮。
         #    实测踩到：第2轮写成 inherit:prompt:permit，第3轮判断
         #    startswith("prompt:") 不成立 → 继承断链 → 上限又掉回 0。

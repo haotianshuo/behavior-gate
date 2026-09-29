@@ -65,7 +65,18 @@ NO_ASK_RX = re.compile(
 #    真正的禁令（「别测试」「先别测试」）前面是词首或副词，不受影响 ——
 #    ⚠️ 所以刻意【不】做成"别 前面是汉字就不算" ——
 #       那会把「先别测试」「暂时别测试」一起放掉。
-_BIE_COMPOUND = r"(?<![分辨识判区个特级类性派告差诀])"
+# ⚠️ 审计修复（2026-09-29，五维验证 X13）：补「X别」复合词缺字。
+#    修前表缺「鉴」→ 「鉴别测试用例的正确性」被记成禁测（实测 no_verify=True，
+#    之后模型跑测试 rc=2）—— 3.5.17 修「分别测试」时自称"同类复合词"，
+#    但清单不全，同族误报仍活着。
+#    本次补：鉴/甄（鉴别、甄别）+ 离别义一族（离惜辞永送挥阔拜话作 —— 这些字
+#    作「X别」后缀时均为"分离"义，且都【不】作副词用，故不会遮住真禁令）。
+#    刻意【不】补「道」：「难道别测试」是真禁令，加"道"会漏拦 ——
+#    黑名单式的固有上限，见下方路线图注记。
+#    ⚠️ 路线图（未实施）：把黑名单改为【命令位白名单】（别 前面必须是行首/
+#    标点，或先/暂/请/都/也/就/再/还 等副词）—— 判据更稳，但会改变 14 个
+#    既有复合词的判定面，需专门一轮评估，不在本次授权范围。
+_BIE_COMPOUND = r"(?<![分辨识判区个特级类性派告差诀鉴甄离惜辞永送挥阔拜话作])"
 
 # P2-3：用户说"不用测"
 NO_VERIFY_RX = re.compile(
@@ -294,7 +305,12 @@ def decide_intent(prompt, prev=None, review=None):
         elif user_disabled:
             # 用户主动关闭 → 回到 3.5.x 的纯词表行为（这是他选的路径）
             if prompt:
-                kw_ask, kw_verify, kw_ask_frag, kw_verify_frag = scan_intent(prompt, prev)
+                # ⚠️ 审计修复（2026-09-29，五维验证 X10/U13）：词表路径也必须跑
+                #    在【剥离引用后】的文本上 —— 修前传原始 prompt，于是
+                #    `~~~\n不要测试\n~~~` 这类被引用的文本会被 Scan 成"用户禁令"
+                #    （U13：禁令建立侧未做引用剥离，与覆盖侧不对称；覆盖侧
+                #    早就在用 _asserted）。语义路径不受影响（它用 _asserted）。
+                kw_ask, kw_verify, kw_ask_frag, kw_verify_frag = scan_intent(_asserted, prev)
                 # 词表只用于【设置】：不清除语义/上轮已建立的状态，避免
                 # 「关一次开关，禁令被静默解除」。清除只能来自语义 require 或显式覆盖。
                 if kw_ask:
@@ -383,9 +399,33 @@ TEST_CMD_RX = re.compile(
     #       实测漏拦（security reviewer）：六种包装形态全部 rc=0。
     #    保留 C2 目标不变：裸空格后的参数位（ls pytest / mkdir pytest /
     #    rg … pytest）仍不命中（v7 三验脚本的 3 条回归线已复验通过）。
-    r"(^[ \t]*|\n[ \t]*|[;&|(]\s*|"
-    r"(?:sudo|env|nohup|time|timeout|nice|command|exec|stdbuf|xargs)"
-    r"(?:\s+[A-Za-z_]\w*=\S+|\s+-{1,2}[\w=.,-]+|\s+\d+)*\s+|--exec\s+)("
+    # ⚠️ 审计修复（2026-09-29，五维验证 X11/X12）：
+    #   ① X11：命令位后允许【裸赋值前缀序列】`BUILD=1 pytest` ——
+    #      包装词分支本就容忍 `env FOO=1`，但 POSIX 裸赋值形态（无语 env）
+    #      不在任何分支 → 实测 `BUILD=1 pytest` / `CI=1 pytest -q` rc=0，
+    #      而同义的 `env BUILD=1 pytest` rc=2（同族不一致）。
+    #   ② X12：包装词参数容忍【带单位】的时长（`timeout 30s` / `5m`）——
+    #      原 `\s+\d+` 只认 `timeout 60`，实测 `timeout 30s pytest` rc=0。
+    #   ③ X12：`bash|sh|zsh|dash -c ` 后视为命令位（无引号形态）——
+    #      `bash -c pytest` 此前 rc=0，而"引号内是数据区"的既有声明
+    #      并不覆盖它（无引号时下一个实参就是被执行的命令）。
+    #      ⚠️ 带引号的 `bash -c "pytest -q"` 仍然不拦（已声明边界）——
+    #      引号字符使本分支天然失配，行为不变。
+    # ⚠️ 三验第二遍新发现（技术总监裁定：正向，本轮修）：命令位补 shell 保留字。
+    #    实测（旧版/新版一致，属既有边界）：`if true; then pytest -q; fi`、
+    #    `then pytest -q`、`for x in a; do pytest -q; done` 全 rc=0 ——
+    #    保留字之后就是命令位，但 `;` 分支只吃空白，撞到 `then`/`do` 即失败。
+    r"((?:^[ \t]*|\n[ \t]*|[;&|(]\s*|(?:then|do|else|elif|while|until|if|!)\s+)"
+    r"(?:[A-Za-z_]\w*=\S*[ \t]+)*|"
+    # ⚠️ 赋值序列也允许出现在【包装词之前】（`FOO=1 timeout 30s pytest`）——
+    #    三验第一遍补：只给"命令位"分支加赋值前缀会漏掉这种组合形态。
+    r"(?:[A-Za-z_]\w*=\S*[ \t]+)*(?:sudo|env|nohup|time|timeout|nice|command|exec|stdbuf|xargs)"
+    r"(?:\s+[A-Za-z_]\w*=\S+|\s+-{1,2}[\w=.,-]+|\s+\d+\w*)*\s+|"
+    # ⚠️ 必须【绑定命令位】：无约束地把 `bash -c ` 当分支会误拦文字提及 ——
+    #    实测（本批回归抓到）：`解释一下 bash -c pytest 的含义` 被判成测试命令。
+    #    加命令位前缀后：行首/换行/`;`/`&&`/`|`/`(` 之后的 `bash -c pytest` 仍拦，
+    #    句中提及不拦（与裸 `pytest` 的位置判据一致）。
+    r"(?:^[ \t]*|\n[ \t]*|[;&|(]\s*)(?:bash|sh|zsh|dash)\s+-c\s+|--exec\s+)("
     r"pytest|py\.test|"
     r"npm\s+(run\s+)?test(:[\w:.-]+)?|yarn\s+test(:[\w:.-]+)?|"
     r"pnpm\s+test(:[\w:.-]+)?|"
@@ -394,7 +434,8 @@ TEST_CMD_RX = re.compile(
     r"go\s+test|"
     r"cargo\s+test|"
     r"dotnet\s+test|"
-    r"python[0-9.]*\s+-m\s+(pytest|unittest|nose)"
+    # ⚠️ X12：补 Windows 的 `py` 启动器（`py -m pytest` 此前 rc=0）。
+    r"(?:python[0-9.]*|py)\s+-m\s+(pytest|unittest|nose)"
     # ⚠️ 尾集合含 `.` —— 覆盖方法调用形态 `pytest.main()`。
     #    回归（intent_gate_test「-c 里的真实执行（修复不得把它漏掉）」）：
     #    `python -c "import pytest; pytest.main()"` 里 `-c` 内容保持原样，

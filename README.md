@@ -211,8 +211,14 @@ python tools/verify_gates_live.py
 | G5 | 喂 `rm -rf /` | `exit 2` |
 | G5 | 喂 `find /tmp -name x` | `exit 0` **且有警告输出** |
 | G5 | 喂 `ls -la` | `exit 0` **且完全静默** |
-| G7 | 用户说「不要再问」后触发询问 | `exit 2` |
+| G7 | 用户说「不要再问」后触发询问 | `exit 2` [^g7] |
 | 观测 | 跑完后 `gate-events.jsonl` 有新增 | 有 |
+
+[^g7]: **G7 核验的适用条件**（2026-09-29 补，五维验证 X16）：须在语义评审
+【可用或已关闭】的配置下进行。若配置为启用（默认）但通道**故障**（连不上/
+超时/格式错），该轮标为「未裁决」——按 policy `_failure_rule` 保留既有约束、
+不用词表新增禁令，此时本行实际为 `exit 0`。那不是门失效，是它在故障时
+不擅自限制用户；故障路径与「用户主动关闭」路径的提示文案不同，可区分。
 
 > ⚠️ **为什么这一节必须单独存在**：一个门可能「代码逻辑正确」但「实际不生效」——
 > 比如 hook 没注册、被平台跳过、或异常时静默放行。
@@ -363,7 +369,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（120 项真实问题）
+├─ CHANGELOG.md                    变更记录（136 项真实问题）
 ├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
