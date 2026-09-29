@@ -45,7 +45,12 @@ def main():
         deny(
             "【G1 预算门】拒绝在子代理内继续派生子代理。\n"
             "  当前位置：agent_id=%s\n"
-            "  原因：agent_depth 上限 = %d，嵌套派生是本次审计中最主要的 Token 黑洞\n"
+            "  原因：本版本禁止【任何】嵌套派生 —— 这是硬规则，不可配置。\n"
+            "        （policy 里的 agent_depth = %s 只是显示值，不参与判定：\n"
+            "         审计实测即使配成 2，嵌套依然被拒 —— 旧文案印"
+            "「上限 = 2」\n"
+            "         与行为矛盾，本次如实修正。）\n"
+            "        嵌套派生是本次审计中最主要的 Token 黑洞\n"
             "        （审计实测：75 次派生中 40 次即 53%% 发生在子代理内部，\n"
             "         WebFetch 的 96%% 消耗在子代理内）。\n"
             "  请改用：在当前子代理内直接完成，或把结论返回给主对话。"
@@ -70,8 +75,16 @@ def main():
             # 上限不可信 = 配额不可信。预算是"不允许超"的语义 → 保守拒绝。
             return st, ("CAP_INVALID", 0, 0)
 
-        used_v, used_ok = safe_cap(st.get("agent_spawns", 0), "agent_spawns")
-        used = used_v if used_ok else 0
+        used_v, used_ok = safe_cap(st.get("agent_spawns", 0), "agent_spawns",
+                                   clamp=False)
+        if not used_ok:
+            # ⚠️ 审计修复（2026-09-29，F4）：与 safe_cap 契约及上一段注释对齐。
+            #    修前这里是 `used = used_v if used_ok else 0` —— 恰是上一段
+            #    注释自己声明修掉了的行为：把不可信计数当 0 → 配额静默重置
+            #    （实测：状态里 agent_spawns="5"/null/true → 放行且计数重置为 1）。
+            #    cap 侧保守拒绝、used 侧静默归零的不对称也是"只修一侧"的老毛病。
+            return st, ("USED_INVALID", 0, 0)
+        used = used_v
 
         if cap == 0:
             return st, ("DENY_FORBIDDEN_BY_TASK", used, cap)
@@ -100,6 +113,18 @@ def main():
             "  请检查状态文件中的 agent_spawns 是否为整数：%s"
             % path,
             gate_id="G1", rule_id="cap_invalid",
+            tool="Agent", session_id=data.get("session_id"),
+        )
+
+    if isinstance(res, tuple) and res[0] == "USED_INVALID":
+        # ⚠️ 审计修复（2026-09-29，F4）：已用计数不可信 → 与上限不可信同等处理。
+        deny(
+            "【G1 预算门】已用配额计数不可信（类型异常），本次派生子代理被保守拒绝。\n"
+            "  这不是能力限制：预算是「不允许超」的语义，\n"
+            "  已用计数读不出来时放行，等于放弃配额（且计数会被重置）。\n"
+            "  请检查状态文件中的 agent_spawns 是否为整数：%s"
+            % path,
+            gate_id="G1", rule_id="used_invalid",
             tool="Agent", session_id=data.get("session_id"),
         )
 

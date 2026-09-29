@@ -2,7 +2,7 @@
 
 > 给 Claude Code 加五道**机械门**，治「AI 助手想多做、做了却说完成了」这类毛病。
 >
-> 当前版本：**V3.5.15** ｜ 2026-09-18
+> 当前版本：**V3.5.16** ｜ 2026-09-27
 > 许可证：[MIT](LICENSE)
 
 ---
@@ -136,21 +136,29 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **306 项**全过 —— 12 套功能测试 306，外加本检查器自身 20 项）：
+跑测试（预期 **450 项**全过 —— 16 套功能测试 450，外加本检查器自身 20 项）：
 
 ```bash
-python tests/four_gate_selftest.py        # 54/54
+python tests/four_gate_selftest.py        # 57/57
 python tests/cmd_chain_test.py            # 21/21
 python tests/adversarial_test.py          # 25/25
-python tests/budget_safety_test.py        # 38/38
-python tests/intent_gate_test.py          # 21/21
+python tests/budget_safety_test.py        # 44/44
+python tests/intent_gate_test.py          # 43/43
 python tests/upgrade_path_test.py         # 19/19
-python tests/g5_real_regression_test.py   # 25/25  ← 真实会话挖出的用例
+python tests/g5_real_regression_test.py   # 37/37  ← 真实会话挖出的用例
 python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
 python tests/gate_events_test.py          # 33/33  ← Gate 事件记录
 python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
 python tests/install_cli_test.py          # 12/12  ← 安装参数回归
 python tests/mcp_field_dispatch_test.py   # 27/27  ← MCP 字段分派
+python tests/g3_attribution_regression_test.py  # 31/31  ← G3 归属误报/漏拦回归
+python tests/semantic_intent_test.py      # 21/21  ← G7 语义意图（离线层）
+python tests/semantic_contract_test.py    # 47/47  ← 输入合同 / 时间预算 / 失败规则（全离线）
+python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（离线层；另 1 项 KNOWN-UNRESOLVED）
+
+> 两个 `semantic_*` 套件的**在线层默认跳过**（`BEHAVIOR_GATE_ONLINE=1` 开启真实调用）。
+> 跳过的项**不计入**上面的数字 —— 「没跑」不写成「通过」。
+> 在线层的真实调用结果单独留档（G7 5/5、G3 4/4，含 real_03）。
 python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
 ```
 
@@ -161,7 +169,7 @@ python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
 
 ### 怎么验证「门真的在拦」（不是「代码逻辑对」）
 
-上面 13 套测试验的是**代码逻辑**。它们全绿，**不代表门真的会拦住你**。
+上面 17 套测试验的是**代码逻辑**。它们全绿，**不代表门真的会拦住你**。
 
 要验证门的**实际行为**，用真实部署的 hook 喂真实输入，看退出码：
 
@@ -333,7 +341,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（92 项真实问题）
+├─ CHANGELOG.md                    变更记录（99 项真实问题）
 ├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
@@ -342,7 +350,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十三套测试（306 项，含真实回归）
+└─ tests/                          十七套测试（450 项，含真实回归）
 ```
 
 ---

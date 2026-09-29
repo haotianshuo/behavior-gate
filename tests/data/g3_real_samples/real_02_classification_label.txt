@@ -1,0 +1,79 @@
+**证据**：L2 动态（本地实跑；退出码与原始输出留档于 `_pilot_v1\evidence\`）
+
+**风险级别**：低
+
+- 用户下次会看到什么不同：`_pilot_v1` 内新增 2 个样本、1 份试用记录、5 份证据；`freshness_scan.py` 与 `EXPECTED.json` 各一处定点修改。行为门零变化。
+- 在哪看：`_pilot_v1\observe\`、`_pilot_v1\evidence\`
+- 我怎么确认它生效了：见下方三份独立报告，每份都有原始输出位置
+- 未验证项：见第四节（均为 `NOT_MEASURED`）
+
+---
+
+# 一、缺陷修复结果
+
+**根因**（两处，同一后果）：
+- `validate()` 只校验 `seq` / `path` / `request`，**完全不校验 `result` 值域**
+- `scan_write()` 只在步骤 3.5 校验**最后被选中的那条**记录的 `result`
+
+于是非法值只要不在"最后被选中"的位置，就永远不会被看到。
+
+**修复**：在 `validate()` 的 verifications 循环里补一个值域检查（`"pass"` / `"fail"` / `null` / 缺失之外一律 `bad_verification`）。一处改动，覆盖每条记录。
+
+**R2 达成**：`FRESH_OK / verified_after_write` → `INVALID_INPUT / bad_verification`
+**R3 达成**：s14 验证了「非法值出现在**不被任何 coverage 覆盖**的记录上」也返回 `INVALID_INPUT`
+**R4 保留**：s02/s03/s04/s05 全部仍然通过 → `null` / 缺失 / `pass` / `fail` 语义未变
+**N8 达成**：`EXPECTED.json` 既有条目**一条未改**，只新增 2 条
+
+**A1 假设**（合同未指定"值域校验放步骤 0 还是 3.5"）：已在任务合同中**动手前**声明，附理由与影响。
+
+# 二、P1/P2 实际执行情况
+
+**P1**：合同在**第一个文件写入之前**产出（顺序可核对）；遗漏要求 0 处、擅自新增 0 处、无谓暂停 0 次、取证完整。
+未暂停的理由按 P1 §1 判据逐条检查：不改数据、不改权限、不可逆？否、对外接口？无 → 非高影响。
+
+**P2**：走完 `NEW → TRANSLATED → PRIMARY_DEFINED → REPRODUCED → PATCHED → PRIMARY_VERIFIED → REGRESSION_VERIFIED → CLOSED`，**先红后绿**：
+
+| 阶段 | 结果 |
+|---|---|
+| 加回归后（修复前） | **红** — 4 项失败，exit=1 |
+| 修复后 | **绿** — 74 项通过，exit=0 |
+
+**P2-ADD-1 检验（本次重点）**：本次确实存在一个合同未指定的选择（值域校验的**位置**）；它在**动手前**写入合同的「五、我的假设」，附理由与影响。→ 该待补项在本次真实任务中**成立**。
+
+**执行失误如实记录**：我有一条取数命令写了语法错误的 `python -c` 片段（产生一次 `SyntaxError`），未影响证据文件写入。归因为我自己的命令错误，非产品/测试缺陷。
+
+# 三、原始失败与复验位置
+
+```
+修复前复现      evidence/review_R01_BEFORE.txt        FRESH_OK / verified_after_write
+回归红灯        evidence/review_R01_TEST_RED.txt      失败 4 / 共 74，exit=1
+修复后复验      evidence/review_R01_AFTER.txt         INVALID_INPUT / bad_verification
+回归绿灯        evidence/review_R01_TEST_GREEN.txt    通过 74，失败 0，exit=0
+终态复核        evidence/review_R01_FINAL.txt         通过 74，exit=0
+
+新增样本        observe/samples/s13_invalid_result_not_last.json（给定输入，原样）
+                observe/samples/s14_invalid_result_out_of_coverage.json（R3 完整边界）
+试用记录        evidence/trial_log.md
+```
+
+**两处记录更正**（原始记录逐字保留，另加更正块，未追溯改写）：
+- `protocol_drill_20260926.md` §3 + §6：M3 拆成**功能验证通过**与**协议执行失败**两个结论，互不抵消
+- `g3_false_positive_samples.md`：G3-FP-001 拆成**机制层 = 已知设计取舍**（CONFIRMED）与**归属层 = 证据归属误报**（CONFIRMED），标注子类 `KNOWN_DESIGN_TRADEOFF_FP`。**未改 G3，未隐去未验证项**——并记下旁证：重发时未测量项照旧完整列出，仍然通过。
+
+**未触碰核对**：`settings.json`(09-21 17:05)、`behavior-policy.json`(09-20 19:40)、`effect_gate.py`(09-18 02:55) 时间戳均早于今日；`hooks\freshness_scan.py` **不存在**（未接入）。`python -B` 本轮**零新增字节码**（现存两个 `.pyc` 为上一轮留下，未删除）。
+
+# 四、仍未验证的能力
+
+```
+· 真实数据可用性                NOT_MEASURED
+· 宿主 hook 接入                NOT_MEASURED（本轮明确不接入）
+· 协议整体收益（M1~M6）         NOT_MEASURED
+· P2-ADD-1 的普遍遵守率         NOT_MEASURED（本次 N=1，成立）
+· P1 的语义翻译能力             NOT_MEASURED —— 本次是【结构化指派】，
+                                你的原话本身就是规格，不构成对"语义翻译"的检验
+· 观测层丢事件发生率 / 时区基准   NOT_MEASURED
+· 额外操作负担（M6）            NOT_MEASURED —— N=1 且任务很小，不据此估常态
+```
+
+**这次成功证明了**：协议能在一个真实任务上被完整执行，且一个具体缺陷被修复并复验。
+**这次没有证明**：协议带来了整体收益，或在复杂/多文件/高影响任务上同样可行。

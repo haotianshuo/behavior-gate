@@ -35,13 +35,36 @@ PY = sys.executable
 results = []
 
 
+def _policy_semantic_off():
+    """隔离策略：关闭语义评审（本地候选 3.6.1）。
+
+    本套件断言的是【门在给定文本上的确定性判定】。语义评审一旦被真实调用，
+    结果会随模型通道波动（实测：同一份代码一轮 25/25、一轮 24/25，漏的正是
+    「任务结束。」这类边界措辞被模型判成非声明）。
+    **不稳定的判定断言等于没有断言** —— 所以程序逻辑测试一律走关闭语义的策略，
+    语义路径由 semantic_* 三个套件用本地假模型覆盖。
+    """
+    import json as _json
+    import tempfile as _tf
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "policy", "behavior-policy.json")
+    with open(src, encoding="utf-8") as f:
+        pol = _json.load(f)
+    pol.setdefault("semantic_review", {})["enabled"] = False
+    p = os.path.join(_tf.mkdtemp(prefix="adv-policy-"), "policy.semantic-off.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump(pol, f, ensure_ascii=False, indent=2)
+    return p
+
+
+_POLICY_OFF = _policy_semantic_off()
+
+
 def run(script, payload, tmp):
     env = dict(os.environ)
     env["CLAUDE_BUDGET_STATE_DIR"] = tmp
     # 显式锁定包内策略 —— 不读机器上的全局副本（详见 four_gate_selftest.py 说明）
-    env["CLAUDE_BEHAVIOR_POLICY"] = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "policy", "behavior-policy.json")
+    env["CLAUDE_BEHAVIOR_POLICY"] = _POLICY_OFF
     p = subprocess.run([PY, os.path.join(HOOKS, script)],
                        input=json.dumps(payload).encode("utf-8"),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)

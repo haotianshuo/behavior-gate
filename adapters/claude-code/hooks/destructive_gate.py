@@ -55,7 +55,15 @@ from _lib import read_input, deny, allow, load_policy, warn_inactive  # noqa: E4
 #     (?:...)  吃掉完整的选项序列，让后面的路径锚定生效
 _RM_OPTS = (r"(?=(?:-{1,2}\S+\s+)*-\S*[rR]\S*\s)"   # 必须含递归标志
             r"(?:-{1,2}\S+\s+)+")                    # 吃掉全部选项
-_RM_ROOT_TAIL = r"(\s|$|\*)"                         # 结尾锚定：恰好是根
+# 结尾锚定：恰好是根。
+#
+# ⚠️ 审计实测（2026-09-29）：原来只认 (\s|$|\*)，于是下列"根等价写法"全部放行：
+#     rm -rf ~/     rm -rf //     rm -rf /.     rm -rf "$HOME"     rm -rf '/$HOME'
+#   根目标后允许【尾随斜杠/点/引号】不改变语义（// == /，~/ == ~，/. == /），
+#   所以锚定放宽为：根目标 + 若干 [/ . " ' ” ’] + (\s|$|\*)。
+#   不放宽的部分：紧跟目标之后的第一个非上述字符（如 /tmp 的 t）仍使匹配失败
+#   —— `rm -rf /tmp/build` 这类正常清理继续放行（回归由 t2 用例守住）。
+_RM_ROOT_TAIL = r"[\\/\.\"'”’]*(\s|$|\*)"
 
 
 # ---- MCP 字段名 → 规则集 的显式名单（3.5.10 / #53）----
@@ -79,11 +87,58 @@ _RM_ROOT_TAIL = r"(\s|$|\*)"                         # 结尾锚定：恰好是�
 #       code 有明确的"要执行的代码"语义（MCP 常见 mcp__repl__execute
 #       这类工具的入参就叫 code），与 script 同类。
 #       分清"通用容器名"与"有明确执行语义的名字"是这个名单的关键。
+# ---- 「执行语义」模式：同一模式必须同时挂在【执行侧】与【写入侧】----
+#
+# ⚠️ 审计实测（2026-09-29）：fork_bomb / disk_overwrite 原先只挂在 CONTENT_DENY，
+#    结果是【方向反了】——
+#        Bash 真执行 fork bomb       → 放行（rc=0）
+#        Bash 真执行 dd 覆写块设备    → 放行（rc=0）
+#        Write 写一份含该命令的文档  → 被拦（rc=2）
+#    这两条模式的语义是「会执行的东西」，写入侧只是顺带覆盖；
+#    只挂写入侧 = 真危险放行、写文档误拦。
+#    修法：模式只定义一次（常量），执行侧与写入侧都引用 ——
+#    避免本项目 #19/#38 的老毛病（同一条规则只在一侧修好，另一侧漏掉）。
+_FORK_BOMB_PAT = r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"
+_DISK_OVERWRITE_PAT = (r"\bdd\b[^\n]*\bof="
+                       r"(/dev/(sd|nvme|hd)\w*|\S*PhysicalDrive\d+)")
+
+
 MCP_CMD_FIELDS = {
     # 会被执行的命令 / 脚本。这些字段的值可能真的进 shell。
     "command", "cmd", "script", "shell", "exec", "argv", "args",
     "code", "stdin",
 }
+
+
+def _to_matchable(v):
+    """把 MCP 字段值转成【可匹配文本】。
+
+    ⚠️ 审计实测（2026-09-29）：修前对容器值直接 str(v)（= repr 语义），
+       于是 {"command": ["rm", "-rf", "/"]} 变成 "['rm', '-rf', '/']" ——
+       带引号与括号，`\\brm\\s+` 与尾锚定全部失配 → 整条命令规则放行。
+       实测：argv(list) / args(list) / command(list) / 嵌套 dict 全部 rc=0，
+       而同内容的字符串形态 rc=2。
+
+    语义：
+      · 字符串     → 原样
+      · list/tuple → 用空格连接（argv 语义："rm -rf /"）
+      · dict       → 取 values 递归后空格连接
+      · None       → 空串（不参与匹配）
+      · 其他标量   → str(v)
+
+    取舍：连接可能把参数里的危险串拼成命令形态而命中（如
+    ["echo", "rm -rf /"]）—— 方向是【宁可多拦】，与本门 FAIL-OPEN 的
+    总体策略不冲突（漏拦静默、误拦可见，不对称已在本文件多处说明）。
+    """
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (list, tuple)):
+        return " ".join(_to_matchable(x) for x in v)
+    if isinstance(v, dict):
+        return " ".join(_to_matchable(x) for x in v.values())
+    if v is None:
+        return ""
+    return str(v)
 
 
 # ⚠️ 不变量（3.5.10 / #48 确立）：**每条规则只作用于语义对应的字段**。
@@ -131,11 +186,28 @@ CMD_DENY = [
         "id": "rm_rf_traversal",
         # 3.5.10 修复（#48）：补结尾锚定 + 认短选项分离 + 认大写 R。
         # 修前：`rm -rf /tmp/v350` 误拦（前缀贪婪），`rm -r -f /` 与 `rm -Rf /` 漏拦。
-        "pattern": r"\brm\s+" + _RM_OPTS + r"(/|~|\$HOME|\*)" + _RM_ROOT_TAIL,
+        # 3.5.18（审计 2026-09-29）：目标组补 ${HOME}/${TEMP}/$TEMP/%TEMP% 等价写法，
+        #   尾锚定容忍尾随斜杠/点/引号（见 _RM_ROOT_TAIL 注释）。
+        "pattern": (r"\brm\s+" + _RM_OPTS +
+                    r"[\"']?(/|~|\$HOME|\$\{HOME\}|\$\{TEMP\}|\$TEMP|%TEMP%|%TMP%|\*)"
+                    + _RM_ROOT_TAIL),
         "why": "递归强删根目录/家目录/通配。\n"
                "  只匹配【目标恰好是根】的情况 ——\n"
                "  `rm -rf /tmp/build` 这类正常清理不会被拦。",
         "instead": "写出完整、具体的路径，并先 `ls` 确认目标。",
+    },
+    {
+        "id": "rm_rf_dotdot_root",
+        # 审计新增（2026-09-29）：`rm -rf '/tmp/../'` 等价于删根（规范化后 = /），
+        # 但目标字面量不是根，上面几条规则全部放行。
+        # 判据：目标以 /、~ 或 $HOME 开头，且【以 `..` 段结尾】——
+        #       规范化后必然落在根或根的近旁，删除范围不可控。
+        # 刻意不拦相对路径（`rm -rf ../build` 这类常规"删兄弟目录"不在本规则范围）。
+        "pattern": (r"\brm\s+" + _RM_OPTS +
+                    r"[\"']?(/|~|\$HOME)[^\s\"']*/\.\.([\\/]\.\.)*[\\/]?[\"']?\s*$"),
+        "why": "递归强删一个【规范化后到达根】的路径（…/../、/..）。\n"
+               "  实测：`rm -rf '/tmp/../'` 此前放行 —— 它等价于 `rm -rf /`。",
+        "instead": "写出完整、具体的最终路径（不带 .. 段），并先 `ls` 确认目标。",
     },
     {
         # 3.5.9 新增（#44）。外部复核实测：本机是 Windows 11，
@@ -175,11 +247,27 @@ CMD_DENY = [
         # 3.5.10 修复（#48）：与 rm_rf_traversal 共用选项解析片段。
         # 修前同样漏 `rm -r -f $env:TEMP/x` 与 `rm -Rf $TEMP`。
         "pattern": r"\brm\s+" + _RM_OPTS +
-                   r"(\$env:(TEMP|TMP|USERPROFILE)|\$TEMP|\$TMP|\$USERPROFILE|\$HOME)"
-                   r"([\\/](\s|$|\*))?",
+                   r"[\"']?(\$env:(TEMP|TMP|USERPROFILE)|\$\{(TEMP|TMP|USERPROFILE|HOME)\}"
+                   r"|\$TEMP|\$TMP|\$USERPROFILE|\$HOME|%TEMP%|%TMP%|%USERPROFILE%)"
+                   r"([\\/\.\"'”’]*(\s|$|\*))?",
         "why": "递归强删 Windows 环境变量指向的目录（临时目录/用户目录）。\n"
                "  实测 `rm -rf $env:TEMP/x` 与 `rm -rf $TEMP/x` 此前放行。",
         "instead": "写出完整的具体路径，并先 `ls` 确认目标。",
+    },
+    {
+        # 审计新增（2026-09-29）：本条原先只在写入侧（CONTENT_DENY），
+        # 于是【真执行放行、写文档被拦】——见 _FORK_BOMB_PAT 处的说明。
+        "id": "fork_bomb",
+        "pattern": _FORK_BOMB_PAT,
+        "why": "Fork bomb（同时覆盖执行与写入两条通道；执行侧此前漏拦）。",
+        "instead": "不要写这个。",
+    },
+    {
+        # 审计新增（2026-09-29）：同 fork_bomb —— 原只在写入侧。
+        "id": "disk_overwrite",
+        "pattern": _DISK_OVERWRITE_PAT,
+        "why": "直接覆写块设备（同时覆盖执行与写入两条通道；执行侧此前漏拦）。",
+        "instead": "如果是文档示例，标注清楚并改用占位路径。",
     },
 ]
 
@@ -207,13 +295,21 @@ CONTENT_DENY = [
     },
     {
         "id": "fork_bomb",
-        "pattern": r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
+        # ⚠️ 审计修复（2026-09-29，三遍交叉验证后实施）：补行首锚定（AGENTS.md 约束 3）。
+        #    修前：句中提及该模式即被拦（project-standards reviewer 实测复现；
+        #    本会话真实发生两次 —— 写审计报告引用该字面量被本门拦下）。
+        #    判据与同列表的 rm_rf_in_content 完全同形：独占整行（允许缩进）
+        #    才拦，作为被讨论的文本放行。执行侧 CMD_DENY 保持全文匹配（有意保守）。
+        "pattern": r"^[ \t]*" + _FORK_BOMB_PAT,
+        "line_anchored": True,
         "why": "Fork bomb。",
         "instead": "不要写这个。",
     },
     {
         "id": "disk_overwrite",
-        "pattern": r"\bdd\b[^\n]*\bof=/dev/(sd|nvme|hd)",
+        # ⚠️ 审计修复（2026-09-29）：同上，补行首锚定（AGENTS.md 约束 3）。
+        "pattern": r"^[ \t]*" + _DISK_OVERWRITE_PAT,
+        "line_anchored": True,
         "why": "直接覆写块设备。",
         "instead": "如果是文档示例，标注清楚并改用占位路径。",
     },
@@ -378,7 +474,9 @@ def main():
             name = str(k).lower()
             if name in MCP_CMD_FIELDS:
                 # 只对【已知会执行】的字段套命令规则。
-                items.append((field, str(v), cmd_rules))
+                # ⚠️ 值必须是 _to_matchable(v) 而不是 str(v) —— 容器值的
+                #    repr 形态会让全部命令规则失配（审计实测，见该函数注释）。
+                items.append((field, _to_matchable(v), cmd_rules))
             else:
                 # 已知内容字段 + 【名单外字段】→ 都只过 content_rules。
                 #
@@ -406,14 +504,28 @@ def main():
                 #      且其命令字段名不在 MCP_CMD_FIELDS 里 → 会漏拦。
                 #    这是刻意取舍，与「门是防误操作层，不是安全边界」一致。
                 #    见 install.md 的「已知边界」。
-                items.append((field, str(v), content_rules))
+                items.append((field, _to_matchable(v), content_rules))
         targets = items
     elif tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
-        # 只对内容做损害性检查；路径单独只看是否指向敏感位置
+        # 只对内容做损害性检查；路径单独只看是否指向敏感位置。
+        #
+        # ⚠️ 审计实测（2026-09-29）：修前字段清单只有 content/new_string，
+        #    于是 NotebookEdit 的 new_source 与 MultiEdit 的 edits[].new_string
+        #    【完全不过内容规则】——这两个工具注册了但等于没挂：
+        #        NotebookEdit.new_source 含 rm 删根整行 / fork bomb → rc=0（放行）
+        #        MultiEdit.edits[].new_string 含 fork bomb         → rc=0（放行）
+        #    同内容的 Write/Edit 均 rc=2。宿主的 NotebookEditInput 字段名
+        #    就是 new_source（不是 new_string）。
         items = []
-        for k in ("content", "new_string"):
+        for k in ("content", "new_string", "new_source"):
             if ti.get(k):
                 items.append((k, str(ti[k]), content_rules))
+        edits = ti.get("edits")
+        if isinstance(edits, list):
+            for i, ed in enumerate(edits):
+                if isinstance(ed, dict) and ed.get("new_string"):
+                    items.append(("edits[%d].new_string" % i,
+                                  str(ed["new_string"]), content_rules))
         for k in ("file_path", "notebook_path"):
             if ti.get(k):
                 items.append((k, str(ti[k]), warn_rules))

@@ -75,9 +75,20 @@ def read_input():
 
 
 def emit_json(obj):
-    """输出 JSON（UTF-8，不转义中文）。"""
+    """输出 JSON（UTF-8，不转义中文）。
+
+    ⚠️ 审计修复（2026-09-29）：本函数与 emit_text/deny/deny_stop/warn_inactive
+        的 reconfigure 原先只传 encoding —— CPython 的 reconfigure(encoding=)
+        会把 error handler 【重置为 strict】，撤销 _force_utf8_console 在模块
+        加载时设置的 errors="replace"。
+        后果（A 组审计实测 t_a9/t_a10，本机独立复现）：输入含孤立代理字符
+        （JSON \\ud800 / JS 未配对代理对）时 deny() 在 emit_json 处抛
+        UnicodeEncodeError → budget_gate 的兜底把它变成 exit 0 =
+        【整道门 fail-open】（本该 deny 的场景被放行）。
+        修法：5 处 reconfigure 全部补 errors="replace"（与模块级意图一致）。
+    """
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     sys.stdout.write(json.dumps(obj, ensure_ascii=False))
@@ -87,7 +98,7 @@ def emit_json(obj):
 def emit_text(text):
     """输出明文。UserPromptSubmit 下会被加入上下文。"""
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     sys.stdout.write(text)
@@ -106,7 +117,7 @@ def deny(reason, hook_event="PreToolUse", gate_id=None, rule_id=None,
         record_gate_event(gate_id, rule_id or "unspecified", "deny",
                           tool=tool, session_id=session_id)
     try:
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     emit_json({
@@ -139,7 +150,7 @@ def deny_stop(reason, gate_id=None, rule_id=None, tool=None,
         record_gate_event(gate_id, rule_id or "unspecified", "stop_feedback",
                           tool=tool, session_id=session_id)
     try:
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     emit_json({"decision": "block", "reason": reason})
@@ -151,7 +162,7 @@ def deny_stop(reason, gate_id=None, rule_id=None, tool=None,
 def warn_inactive(gate_name, why):
     """门未生效时，把原因说给用户听。非阻断。"""
     try:
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     sys.stderr.write("[%s] 未生效：%s\n" % (gate_name, why))
@@ -479,13 +490,40 @@ class _Lock(object):
                 self.held = True
                 return self
 
-            except (FileExistsError, PermissionError):
-                # PermissionError 在 Windows 上是【竞争】的另一种表现，不是"锁坏了"。
-                # 两者必须归入同一个等待分支。
+            except FileExistsError:
+                # ⚠️ 审计修复（2026-09-29，F3）：原分支是
+                #     `except (FileExistsError, PermissionError)`，把两种语义
+                #     不同的失败并成了一类。PermissionError 已拆出单独处理
+                #     （见下方分支）—— mkdir 的"竞争"形态只有一种：
+                #     目录已存在 → FileExistsError。
                 try:
                     age = _time.time() - os.path.getmtime(self.path)
                     if age > self.stale_after:
-                        _shutil.rmtree(self.path, ignore_errors=True)
+                        # ⚠️ 审计修复（2026-09-29，F9）：清理后必须【验证删没删掉】。
+                        #    修前 rmtree(ignore_errors=True) 后无条件 continue ——
+                        #    同名【文件】占位时 rmtree 对文件无效（删不掉），
+                        #    continue 空转到 deadline → LOCK_TIMEOUT → 永久拒绝
+                        #    （实测 rc=2 t≈3.1s，提示"稍等片刻重试"，重试永远不好）。
+                        if os.path.isdir(self.path):
+                            _shutil.rmtree(self.path, ignore_errors=True)
+                        else:
+                            try:
+                                os.remove(self.path)
+                            except Exception:
+                                pass
+                        if os.path.exists(self.path):
+                            # 清理失败 = 环境故障，不是竞争 → 放行 + 告警，
+                            # 绝不空转到超时后永久拒绝（同 F3 的策略）。
+                            if not warned:
+                                sys.stderr.write(
+                                    "【G1 预算门】警告：残留锁无法清理（%s），本门已临时停用。\n"
+                                    "  影响：无法记录派生配额，本次及后续派生将被放行（不阻断）。\n"
+                                    "  这是【有意的降级】—— 环境故障不该把用户永久卡死。\n"
+                                    "  要恢复：手动删除该路径，或设置 CLAUDE_BUDGET_STATE_DIR 指向可写目录。\n"
+                                    % self.path)
+                                warned = True
+                            self.env_unavailable = True
+                            return self
                         continue
                 except Exception:
                     pass
@@ -495,6 +533,52 @@ class _Lock(object):
                     # （6 进程并发时，4/30 轮多放行了 1 个）。
                     # 预算是"不允许超"的语义 —— 拿不到锁时保守拒绝，
                     # 比无锁放行安全得多。调用方会把它当成"配额不可用"处理。
+                    self.timed_out = True
+                    return self
+                _time.sleep(0.01)
+
+            except PermissionError:
+                # ⚠️ 审计修复（2026-09-29，F3 —— 两版之间的修正）：
+                #    PermissionError 有【两种】来源，处置相反：
+                #      ① 瞬态竞争 —— Windows 上锁目录正被另一进程删除时，
+                #         mkdir 也会报它（原注释的观察）。第一版修复把它整个
+                #         拆进"环境故障"分支后，four_gate_selftest 的并发硬
+                #         门槛出现 3/60 轮多放行（无锁放行 = 计数丢失）。
+                #      ② 持久环境故障 —— 状态目录 ACL/只读拒绝写入
+                #         （A 组审计 icacls 实测：永久拒绝 + 提示"稍等片刻重试"，
+                #          重试一万次也不会好 —— 正是本函数要消灭的失败模式）。
+                #    区分判据 = 【目录可写性探针】（直接测当初要防的那件事：
+                #      目录存在但不可写）：
+                #        · 探针能写 → 竞争 → 与 FileExistsError 同样的等待/超时
+                #        · 探针写不了 → 持久故障 → 放行 + 可见告警（不卡死用户）
+                try:
+                    # ⚠️ 探针必须是【每进程唯一名】——否则并发下第二个进程的
+                    #    os.remove 会因"已被对方删掉"而抛 FileNotFoundError，
+                    #    被误判成"不可写"→ 无锁放行（实测 four_gate_selftest
+                    #    并发硬门槛 1/60 轮多放行，正是这条路径）。
+                    _probe = "%s.probe.%d" % (self.path, os.getpid())
+                    with open(_probe, "w", encoding="utf-8"):
+                        pass
+                    _writable = True
+                    try:
+                        os.remove(_probe)
+                    except Exception:
+                        pass          # 清理失败不影响"可写"这一判定
+                except Exception:
+                    _writable = False
+                if not _writable:
+                    if not warned:
+                        sys.stderr.write(
+                            "【G1 预算门】警告：状态目录不可写（权限拒绝），本门已临时停用。\n"
+                            "  位置：%s\n"
+                            "  影响：无法记录派生配额，本次及后续派生将被放行（不阻断）。\n"
+                            "  这是【有意的降级】—— 环境故障不该把用户永久卡死。\n"
+                            "  要恢复：检查该目录写权限，或设置 CLAUDE_BUDGET_STATE_DIR 指向可写目录。\n"
+                            % os.path.dirname(self.path))
+                        warned = True
+                    self.env_unavailable = True
+                    return self
+                if _time.time() >= deadline:
                     self.timed_out = True
                     return self
                 _time.sleep(0.01)
@@ -656,6 +740,27 @@ DEFAULT_POLICY = {
         "warn_patterns": [],
     },
     "closeout": {"enabled": True},
+    # 语义评审单元（本地候选 3.6.0 新增）—— G7 意图理解 / G3 声明归属的「理解层」。
+    #
+    # ⚠️ 数据边界（用户必须能看见，别把它藏在代码里）：
+    #    开启时，用户【本轮原话的相关片段】会被发到 Claude Code
+    #    自己正在使用的模型通道（环境变量 ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY）。
+    #    不新增供应商、不发会话历史、不发文件内容、不发凭据。
+    #    不可用时（通道缺失 / 超时 / 返回格式错误）自动降级为：
+    #    低风险判断退回词表并【留痕】，硬性边界不受影响。
+    # 关闭：把 enabled 设为 false —— 立刻回到 3.5.x 的纯词表行为。
+    "semantic_review": {
+        "enabled": True,
+        "timeout_s": 15,          # 单次请求预算
+        "total_budget_s": 20,     # 整次事件（如一次 Stop）的总预算
+        # ⚠️ 审计修复（2026-09-29，三遍交叉验证后实施）：1200 → 2000。
+        #    修前：同一轮的 policy/behavior-policy.json 已把 max_tokens 调到
+        #    2000（依据：09-28 后 35/82 次评审因「响应文本为空（output_tokens=1200）」
+        #    失败），而本内置默认仍写 1200 —— 三个候选策略文件全部读不到时
+        #    load_policy() 返回 dict(DEFAULT_POLICY)，把刚诊断并修掉的截断故障
+        #    原样搬回来（correctness + reliability 双报，validator confirmed）。
+        "max_tokens": 2000,
+    },
 }
 
 
@@ -882,12 +987,30 @@ def _drop_discussed_hits(text, rx):
     """剔除【前面紧邻讨论语境】的匹配。返回剩下的匹配列表。
 
     text 必须已经过 strip_referenced_text()。
+
+    ⚠️ 审计修复（2026-09-29，F1）：判据与 _ok() 的标点细化对齐 ——
+        语境词与其后的声明之间出现【小句边界】（，。；！？、,;!?~）时，
+        该语境词管的是别的小句，不抹掉这条声明。
+        实测漏拦（A 组审计 t_a4/t_a5，本机独立复现）：
+            「帮我写一份报告，agent_spawns: 3」
+        → 整条显式授权被丢弃 → cap 回落 policy 默认 0
+        → G1 误拦，且报错复述用户「你从未在本会话里授权过派生子代理」
+        （与用户原话直接矛盾）。
+        不对称证据：permit 信号走 _ok()（本条是同文件里更完善的实现）——
+            「不要读别的文件，用三个子代理去验证」= 逗号隔开 → 保留 ✓
+        而 BUDGET_LINE 走本函数 → 同样的逗号隔开却被丢弃 ✗。
+        风险控制：只复用 _ok 既有的标点类，不新造规则；
+        「报告建议 agent_spawns: 2 到 3 之间」（无标点紧邻）仍按语境丢弃
+        —— budget_safety_test「报告建议」用例锁定该行为，未改动。
     """
     out = []
     for m in rx.finditer(text):
         before = text[max(0, m.start() - 25):m.start()]
-        if DISCUSSION_CTX.search(before):
-            continue
+        _bm = DISCUSSION_CTX.search(before)
+        if _bm:
+            _gap = before[_bm.end():]
+            if not re.search(r"[，。；！？、,;!?~]", _gap):
+                continue
         out.append(m.group(1, 2))
     return out
 
@@ -1217,6 +1340,16 @@ def parse_budget_from_prompt(prompt, policy):
         _hit_keys = set()
         if hits:
             for key, val in hits:
+                # ⚠️ 审计修复（2026-09-29，F1b）：禁令优先于同轮的数字声明 ——
+                #    与上面 `if _forbid: … elif _permit:` 的结构意图一致。
+                #    修前：`hits` 分支【无条件覆盖】budget[key] ——
+                #        'agent_spawns: 3 不要派子代理' → 3（数字覆盖禁令）
+                #        '不要派子代理 agent_spawns: 3' → 0
+                #    同一对意图因【语序】得到相反结论；且前一种写法会把
+                #    source 改写成 prompt:explicit —— 把"用户说过禁令"
+                #    从状态里抹掉（事后无法追溯）。
+                if _forbid and key.lower() == "agent_spawns":
+                    continue
                 # BUG-2 修复：类型/取值校验。
                 # 修前：非数字会在 int() 处抛异常被吞掉，
                 #       或状态里存成字符串导致后续静默放行。
@@ -1311,8 +1444,13 @@ def forbid_excerpt(prompt, maxlen=20):
     return None, None
 
 
-def safe_cap(value, key="agent_spawns"):
-    """把预算上限规整成【可信的整数】。
+def safe_cap(value, key="agent_spawns", clamp=True):
+    """把预算值规整成【可信的整数】。clamp=False 时【不】压 HARD_CAPS。
+
+    ⚠️ 审计修复（2026-09-29，F7）：本函数同时被用来读【上限】(cap) 与
+       【已用计数】(used)。"压到硬上限"是 cap 专用的规整规则 ——
+       套在 used 上会把真实计数改掉（实测：状态里 99 → 报错文案显示 20，
+       判定不受影响但用户对不上账）。used 侧改传 clamp=False。
 
     BUG-2 修复：状态文件可能被外部改动或序列化异常，
     出现字符串 / null / 数组 / 负数。这些情况必须【保守处理】，
@@ -1342,7 +1480,8 @@ def safe_cap(value, key="agent_spawns"):
 
     if n < 0:
         return 0, False
-    cap = HARD_CAPS.get(key)
-    if cap is not None and n > cap:
-        return cap, True         # 压到上限，而不是判为不可信
+    if clamp:
+        cap = HARD_CAPS.get(key)
+        if cap is not None and n > cap:
+            return cap, True     # 压到上限，而不是判为不可信
     return n, True

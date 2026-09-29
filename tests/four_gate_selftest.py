@@ -43,14 +43,36 @@ PY = sys.executable
 results = []
 
 
+# ⚠️ 本地候选 3.6.1：默认策略固定为【关闭语义评审】的隔离版本。
+#
+#    本套件有 54 项、要起 54 次子进程。修前它用包内策略（语义开启），
+#    于是每一次调用都可能真实调用模型 —— 实测整场从 ~20s 涨到 124s，
+#    超过 doc_consistency 对单套件 120s 的超时上限，整个递归跑被它拖垮。
+#    程序逻辑测试必须确定性且离线；语义路径由 semantic_* 套件用假模型覆盖。
+def _policy_semantic_off():
+    import json as _json
+    import tempfile as _tf
+    with open(DEFAULT_POLICY_PATH, encoding="utf-8") as f:
+        pol = _json.load(f)
+    pol.setdefault("semantic_review", {})["enabled"] = False
+    p = os.path.join(_tf.mkdtemp(prefix="four-gate-policy-"), "policy.semantic-off.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump(pol, f, ensure_ascii=False, indent=2)
+    return p
+
+
+_POLICY_OFF = _policy_semantic_off()
+
+
 def run(script, payload, state_dir, policy=None):
     """跑一个 hook，返回 (exitcode, stdout, stderr)。
 
-    policy 默认为包内策略 —— 显式隔离，避免读到机器上的全局副本。
+    policy 默认为【关闭语义评审的包内策略副本】——
+    显式隔离：既不读机器上的全局副本，也不让测试触发真实模型调用。
     """
     env = dict(os.environ)
     env["CLAUDE_BUDGET_STATE_DIR"] = state_dir
-    env["CLAUDE_BEHAVIOR_POLICY"] = policy or DEFAULT_POLICY_PATH
+    env["CLAUDE_BEHAVIOR_POLICY"] = policy or _POLICY_OFF
     p = subprocess.run(
         [PY, os.path.join(HOOKS, script)],
         input=json.dumps(payload).encode("utf-8"),
@@ -295,6 +317,36 @@ def main():
         check("记录了 agent 派生", len(st.get("agent_requests", [])) == 1, str(st))
         check("记录了后台命令", len(st.get("background_cmds", [])) == 1, str(st))
         check("记录了写操作", len(st.get("writes", [])) == 1, str(st))
+
+    # ---------- 审计新增（2026-09-29）：F6/F8 两条新行为上锁 ----------
+    #
+    # 背景（ce-code-review 的 testing reviewer #17）：重复提醒判据与状态形状
+    # 修复都是本轮新代码，tests/ 此前零命中 —— 关掉任一条都无红灯。
+    sid6 = "selftest-g6-audit"
+    cmd6 = {"session_id": sid6, "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"}}
+    run("closeout_gate.py", cmd6, tmp)          # 初始化
+    hits = 0
+    for _ in range(4):
+        _c, _o, _e = run("closeout_gate.py", cmd6, tmp)
+        if "重复提醒" in _e:
+            hits += 1
+    check("审计新增 同命令 4 次：重复提醒只出现 1 次", hits == 1, "hits=%d" % hits)
+
+    # F8：状态被外部改坏（null）→ 自愈且继续记录（修前该旁路永久静默停摆）
+    sd8 = "selftest-g6-null"
+    co8p = os.path.join(tmp, "%s.closeout.json" % sd8)
+    open(co8p, "w", encoding="utf-8").write(
+        json.dumps({"session_id": sd8, "bash_cmds": None, "webfetch_count": None},
+                   ensure_ascii=False))
+    run("closeout_gate.py",
+        {"session_id": sd8, "tool_name": "Bash",
+         "tool_input": {"command": "echo hi"}}, tmp)
+    st8 = json.load(open(co8p, encoding="utf-8"))
+    check("审计新增 null 状态自愈：bash_cmds 记回 list 并有新记录",
+          st8.get("bash_cmds") == ["echo hi"], str(st8.get("bash_cmds")))
+    check("审计新增 null 状态自愈：webfetch_count 归零为 int",
+          st8.get("webfetch_count") == 0, str(st8.get("webfetch_count")))
 
     print("\n===== G3：风险分级（互审发现文档承诺未实现） =====")
     sid5 = "selftest-g3risk"

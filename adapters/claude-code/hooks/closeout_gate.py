@@ -56,6 +56,21 @@ def _record(st, session_id, tool, ti, agent_id):
     st.setdefault("bash_cmds", [])
     st.setdefault("webfetch_count", 0)
     st.setdefault("repeat_suspects", [])
+    # ⚠️ 审计修复（2026-09-29，F8）：setdefault 只保证"键存在"，不保证类型正确。
+    #    状态被外部改动/半截写入后（如 null），append/int 会抛异常，而本 hook
+    #    是纯旁路 —— 顶层裸吞后【永久静默停摆】（实测：bash_cmds=null 之后
+    #    所有 Bash 记录都不再写入，stderr 为空，用户零感知）。
+    #    修法：入口处把形状修回预期类型（幂等、无副作用）。
+    for _k in ("agent_requests", "background_cmds", "writes",
+               "bash_cmds", "repeat_suspects"):
+        if not isinstance(st.get(_k), list):
+            st[_k] = []
+    if not isinstance(st.get("webfetch_count"), int) or isinstance(
+            st.get("webfetch_count"), bool):
+        try:
+            st["webfetch_count"] = int(st.get("webfetch_count") or 0)
+        except (TypeError, ValueError):
+            st["webfetch_count"] = 0
 
     if tool == "Agent":
         rec = {
@@ -148,8 +163,15 @@ def main():
         if rp:
             last = rp[-1]
             # 只在【刚记录这一条】时提示一次
-            if last.get("ts") and last.get("cmd") == \
-                    re.sub(r"\s+", " ", (ti.get("command") or "").strip())[:200]:
+            #
+            # ⚠️ 审计修复（2026-09-29，F6）：原判据只比较"当前命令 == 最后一条
+            #    记录"。而记录只在第 3 次追加 —— 第 4 次起 rp[-1] 恒为第 3 次
+            #    那条，判据恒真 → 每次都提示（实测：同一条命令 8 次 → 提醒 6 次，
+            #    文案恒称"已出现 3 次"——第 8 次时这句话是假的）。
+            #    修法：加上"本次计数恰好为 3"——即这一条确实刚被写入。
+            _cur = re.sub(r"\s+", " ", (ti.get("command") or "").strip())[:200]
+            if last.get("ts") and last.get("cmd") == _cur and \
+                    (st.get("bash_cmds") or []).count(_cur) == 3:
                 sys.stderr.write(
                     "【重复提醒】本次会话里这条命令已出现 3 次：\n"
                     "  %s\n"
@@ -193,5 +215,14 @@ if __name__ == "__main__":
         main()
     except SystemExit:
         raise
-    except Exception:
+    except Exception as e:
+        # ⚠️ 审计修复（2026-09-29，F8）：纯旁路可以吞异常，但【不能静默】——
+        #    修前这里只有 sys.exit(0)，于是"记录器永久停摆"没有任何人知道
+        #    （与 _lib.py 的「fail-open 必须可见」原则相反）。
+        #    打一行 stderr 再退：不影响主流程，但故障可见。
+        try:
+            sys.stderr.write("[收尾门] 未生效：脚本异常，本次旁路跳过：%r\n" % (e,))
+            sys.stderr.flush()
+        except Exception:
+            pass
         sys.exit(0)   # 纯旁路，绝不影响主流程

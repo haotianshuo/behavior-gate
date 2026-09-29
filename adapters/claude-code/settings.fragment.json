@@ -9,7 +9,8 @@
           {
             "type": "command",
             "command": "\"{{PYTHON}}\" \"{{HOOKS}}/inject_budget.py\"",
-            "timeout": 5
+            "_timeout_note": "3.6.0 起本 hook 内含语义评审（实测中位 4.6s、超时上限 15s）。timeout 必须大于评审超时，否则宿主先杀掉进程 → 状态写不成，反而比降级更糟。评审不可用时本 hook 仍是亚秒级。",
+            "timeout": 18
           }
         ]
       }
@@ -58,8 +59,8 @@
         ]
       },
       {
-        "_note": "只挂【写入/执行类】MCP 工具，不扫全部 MCP —— 全量扫描会误伤只读查询。",
-        "matcher": "mcp__.*__(write|create|edit|delete|remove|move|rename|put|upload|update|execute|exec|run|bash|shell|terminal).*",
+        "_note": "只挂【写入/执行类】MCP 工具，不扫全部 MCP —— 全量扫描会误伤只读查询。审计 2026-09-29（B 组 N2）：实测 12 个常见写入/执行类工具名里 6 个此前不命中（push / drop_table / insert_record / apply_migration / sync_all / migrate）—— 与「只挂写入/执行类」的设计意图不符，本次补词 push|drop|insert|migrat|apply|sync。副作用：这些名字的 MCP 调用会多跑一次 destructive_gate（旁路检查，百毫秒级）。",
+        "matcher": "mcp__.*__(write|create|edit|delete|remove|move|rename|put|upload|update|execute|exec|run|bash|shell|terminal|push|drop|insert|migrat|apply|sync).*",
         "hooks": [
           {
             "type": "command",
@@ -75,7 +76,8 @@
           {
             "type": "command",
             "command": "\"{{PYTHON}}\" \"{{HOOKS}}/effect_gate.py\"",
-            "timeout": 8
+            "_timeout_note": "3.6.1 起本 hook 内含语义评审（可能两次入口）。必须大于 policy 的 semantic_review.total_budget_s（20s），否则宿主先杀掉进程 → 状态写不成，比超时降级更糟。无完成词命中且本回合无工具活动时仍是亚秒级。",
+            "timeout": 30
           }
         ]
       }

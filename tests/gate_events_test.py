@@ -40,8 +40,34 @@ def check(name, ok, detail=""):
         print("         %s" % detail)
 
 
+def _policy_semantic_off():
+    """隔离策略：关闭语义评审（理由同 g3_attribution / intent_gate 套件）。
+
+    本套件断言「一次门拒绝恰好产生 1 条事件」——
+    而语义评审会额外产生 REVIEW 事件，且在真实通道下时有时无，
+    会让这类计数断言随通道波动。程序逻辑的测试必须可重复。
+    """
+    import json as _json
+    src = os.path.join(os.path.dirname(HOOKS), "..", "..", "policy",
+                       "behavior-policy.json")
+    src = os.path.abspath(src)
+    with open(src, encoding="utf-8") as f:
+        pol = _json.load(f)
+    pol.setdefault("semantic_review", {})["enabled"] = False
+    import tempfile as _tempfile
+    p = os.path.join(_tempfile.mkdtemp(prefix="gate-events-policy-"),
+                     "policy.semantic-off.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump(pol, f, ensure_ascii=False, indent=2)
+    return p
+
+
+_POLICY_OFF = _policy_semantic_off()
+
+
 def run(script, payload, state_dir, source_class=None):
     env = {**os.environ, "PYTHONIOENCODING": "utf-8",
+           "CLAUDE_BEHAVIOR_POLICY": _POLICY_OFF,
            "CLAUDE_BUDGET_STATE_DIR": state_dir}
     if source_class:
         env["BEHAVIOR_GATE_SOURCE_CLASS"] = source_class

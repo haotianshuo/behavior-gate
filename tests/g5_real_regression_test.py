@@ -151,6 +151,53 @@ def main():
           "rc=%d rule=%s（posix_tmp 已降为 WARN，不再阻断）" % (rc, rule),
           "REAL：09-15 09:51 真实会话中被 rm_rf_traversal 误拦")
 
+    # ---------- 审计新增（2026-09-29）：新加/迁移的拦截能力必须上锁 ----------
+    #
+    # 背景（ce-code-review 的 testing reviewer #2，独立验证批 confirmed）：
+    # 下面这些规则是本轮【新加或改过】的，但 tests/ 下此前零命中 ——
+    # 后续任何改动关掉其中一条，425 项仍会全绿。取证形态：以下用例
+    # ＝把代码注释里的只读探针输入硬化成断言（"手测生效 ≠ 回归锁"）。
+    print("\n----- 审计新增｜新拦截能力的回归锁（每组带反例）-----")
+    NEW_BLOCK = [
+        ("Bash", {"command": RM + " -rf '/tmp/../'"},
+         "rm_rf_dotdot_root", "dotdot 规范化归根（审计新增规则）"),
+        ("Bash", {"command": RM + " -rf ~/"},
+         None, "尾锚定放宽：波浪号加尾随斜杠"),
+        ("Bash", {"command": RM + ' -rf "$HOME"'},
+         None, "尾锚定放宽：双引号包裹 HOME"),
+        ("Bash", {"command": RM + " -rf ${HOME}"},
+         None, "尾锚定放宽：花括号 HOME"),
+        ("Bash", {"command": RM + " -rf ${TEMP}"},
+         None, "尾锚定放宽：花括号 TEMP"),
+        ("Bash", {"command": RM + " -rf %TEMP%"},
+         None, "尾锚定放宽：百分号 TEMP"),
+        ("Bash", {"command": ":()" + " { :|:& };:"},
+         "fork_bomb", "执行侧（此前只挂写入侧）"),
+        ("Bash", {"command": "dd if=/dev/zero " + "of=" + "/dev/sda" + " bs=1M"},
+         "disk_overwrite", "执行侧（此前只挂写入侧）"),
+    ]
+    for tool, ti, want_rule, note in NEW_BLOCK:
+        rc, rule = run_gate(tool, ti, tmp)
+        ok = (rc == 2) and (want_rule is None or rule == want_rule)
+        check("审计新增 应拦 %-30s" % note, ok,
+              "rc=%d rule=%s（期望 rc=2%s）"
+              % (rc, rule, " rule=%s" % want_rule if want_rule else ""),
+              "ce-code-review #2：新能力零覆盖")
+    # 反例：常规清理不得被新规则误伤（只测一个方向的用例等于没测）
+    for cmd, note in ((RM + " -rf /tmp/build", "常规清理"),
+                      (RM + " -rf D:/myproj/build", "Windows 项目内清理")):
+        rc, rule = run_gate("Bash", {"command": cmd}, tmp)
+        check("审计新增 应放 %-30s" % note, rule is None,
+              "rc=%d rule=%s" % (rc, rule),
+              "ce-code-review #2：反例配对")
+    # 写入侧（Write）：同内容须仍被拦（#7 锚定修复后为「独占整行」形态）
+    for content, note in (("dd if=/dev/zero " + "of=" + "/dev/sda" + " bs=1M\n", "dd 独占整行"),
+                          (":()" + " { :|:& };:" + "\n", "fork 独占整行")):
+        rc, rule = run_gate("Write", {"file_path": "x", "content": content}, tmp)
+        check("审计新增 应拦(写入侧) %-24s" % note, rc == 2,
+              "rc=%d rule=%s" % (rc, rule),
+              "ce-code-review #2：写入侧不得回退")
+
     # ---------- 字段语义不变量 ----------
     print("\n----- 字段语义不变量（cmd_deny 不作用于写入内容）-----")
     rc, rule = run_gate("mcp__filesystem__write_file",

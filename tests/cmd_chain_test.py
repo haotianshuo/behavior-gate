@@ -64,9 +64,7 @@ def run_registered(script_needle, event, payload, state_dir):
     env = dict(os.environ)
     env["CLAUDE_BUDGET_STATE_DIR"] = state_dir
     # 显式锁定包内策略 —— 不读机器上的全局副本（详见 four_gate_selftest.py 说明）
-    env["CLAUDE_BEHAVIOR_POLICY"] = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "policy", "behavior-policy.json")
+    env["CLAUDE_BEHAVIOR_POLICY"] = _POLICY_OFF
     p = subprocess.run(["sh", "-c", cmd],
                        input=json.dumps(payload).encode("utf-8"),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
@@ -74,6 +72,25 @@ def run_registered(script_needle, event, payload, state_dir):
             p.stdout.decode("utf-8", "replace"),
             p.stderr.decode("utf-8", "replace"))
 
+
+# ⚠️ 本地候选 3.6.1：本套件会按注册命令跑 UserPromptSubmit（inject_budget），
+#    那会触发语义评审 —— 真实通道波动会让「安装链路」的断言时绿时红。
+#    程序逻辑测试必须确定性、离线；语义路径由 semantic_* 套件用假模型覆盖。
+def _policy_semantic_off():
+    import json as _json
+    import tempfile as _tf
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "policy", "behavior-policy.json")
+    with open(src, encoding="utf-8") as f:
+        pol = _json.load(f)
+    pol.setdefault("semantic_review", {})["enabled"] = False
+    _p = os.path.join(_tf.mkdtemp(prefix="cmdchain-policy-"), "policy.semantic-off.json")
+    with open(_p, "w", encoding="utf-8") as f:
+        _json.dump(pol, f, ensure_ascii=False, indent=2)
+    return _p
+
+
+_POLICY_OFF = _policy_semantic_off()
 
 results = []
 
@@ -192,6 +209,7 @@ def main():
         py = _s.executable.replace("\\", "/")
         real = sample.replace("{{HOOKS}}", hooks_fwd).replace("{{PYTHON}}", py)
         env2 = dict(os.environ)
+        env2["CLAUDE_BEHAVIOR_POLICY"] = _POLICY_OFF   # 本地候选 3.6.1：隔离语义评审
         env2["CLAUDE_BUDGET_STATE_DIR"] = tmp
         os.makedirs(tmp, exist_ok=True)
 

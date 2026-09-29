@@ -9,10 +9,28 @@ import json, os, subprocess, sys, tempfile
 
 # 显式锁定包内策略 —— 不读机器上的全局副本（详见 four_gate_selftest.py 说明）。
 # 同一份代码在不同机器上读到不同策略，会让测试结果随环境而变。
+#
+# ⚠️ 本地候选 3.6.1：策略里的语义评审【关闭】。
+#    本套件测的是意图信号的确定性识别（「你不需要任何测试」必须被识别）；
+#    语义评审一旦被真实调用，通道波动会让它走故障路径（按用户 本地候选 3.6.1 要求
+#    不再用词表新增禁令）→ 断言随机失败。程序逻辑测试必须可重复；
+#    语义路径由 semantic_* 套件用本地假模型覆盖。
+def _policy_semantic_off():
+    import json as _json
+    import tempfile as _tf
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "policy", "behavior-policy.json")
+    with open(src, encoding="utf-8") as f:
+        pol = _json.load(f)
+    pol.setdefault("semantic_review", {})["enabled"] = False
+    p = os.path.join(_tf.mkdtemp(prefix="budget-policy-"), "policy.semantic-off.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump(pol, f, ensure_ascii=False, indent=2)
+    return p
+
+
 _POLICY_ENV = dict(os.environ)
-_POLICY_ENV["CLAUDE_BEHAVIOR_POLICY"] = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "policy", "behavior-policy.json")
+_POLICY_ENV["CLAUDE_BEHAVIOR_POLICY"] = _policy_semantic_off()
 
 
 
@@ -38,7 +56,13 @@ T = tempfile.mkdtemp(prefix="bugfix-")
 # _lib 会在模块级/首次调用时读环境变量并缓存。之前的版本因此把状态写到了
 # claude-behavior-gates 下的真实会话文件，而 hook 读的是临时目录 → 永远对不上。
 os.environ["CLAUDE_BUDGET_STATE_DIR"] = T
-E = dict(os.environ, CLAUDE_BUDGET_STATE_DIR=T)
+# ⚠️ 必须用 _POLICY_ENV（隔离策略），不能用裸 os.environ ——
+#    上一版这里写的是 `dict(os.environ, ...)`，于是 CLAUDE_BEHAVIOR_POLICY
+#    没被带上，子进程读到了机器上【已安装】的策略（语义评审开启）→
+#    偶发真实模型调用 → 通道超时时按 本地候选 3.6.1 的新规则走故障路径（不新增禁令）
+#    → 「你不需要任何测试」偶发识别失败（实测 3 次里挂 1 次）。
+#    这正是本项目批评过的形状：变量定义了，但没接到真正使用的路径上。
+E = dict(_POLICY_ENV, CLAUDE_BUDGET_STATE_DIR=T)
 res = []
 
 
@@ -123,6 +147,36 @@ for raw, expect_rc, why in [
                                       "tool_input": {"subagent_type": "E", "description": "x"}})
     check("状态 %-36s rc=%d（%s）" % (raw[:36], rc, why), rc == expect_rc,
           "期望 rc=%d，实际 %d" % (expect_rc, rc))
+
+# ---------- 审计新增（2026-09-29）：顶层 used 损坏与真实值显示 ----------
+#
+# 背景（ce-code-review 的 testing reviewer #6，独立验证批 confirmed）：
+# 上面的 BUG-2 组只损坏 budget.agent_spawns（cap 侧，检查在前直接返回），
+# USED_INVALID 分支永远走不到 —— 把 clamp=False 去掉、或把 used 侧改回
+# 「不可信即归零」，现有全套不会有任何红灯。这两条给该分支上锁。
+print("\n===== 审计新增：顶层 used 计数损坏与真实值显示 =====")
+for sid_, raw, expect_rc, why in [
+    ("u1", '{"budget":{"agent_spawns":3},"agent_spawns":"5"}', 2,
+     "字符串 used -> 保守拒绝（USED_INVALID）"),
+    ("u2", '{"budget":{"agent_spawns":3},"agent_spawns":null}', 2,
+     "null used -> 保守拒绝"),
+    ("u3", '{"budget":{"agent_spawns":3},"agent_spawns":true}', 2,
+     "bool used -> 保守拒绝"),
+    ("u4", '{"budget":{"agent_spawns":3},"agent_spawns":99}', 2,
+     "used=99（cap=3）-> 拦截"),
+]:
+    fp = os.path.join(T, sid_ + ".budget.json")
+    open(fp, "w", encoding="utf-8").write(raw)
+    rc, out = call("budget_gate.py", {"session_id": sid_, "tool_name": "Agent",
+                                      "tool_input": {"subagent_type": "E", "description": "x"}})
+    check("审计新增 %-28s rc=%d（%s）" % (raw.split('"agent_spawns":')[-1][:26], rc, why),
+          rc == expect_rc, "期望 rc=%d，实际 %d" % (expect_rc, rc))
+    if sid_ == "u1":
+        check("审计新增 u1 文案含『已用配额计数不可信』", "已用配额计数不可信" in out,
+              "out=%s" % out[:90])
+    if sid_ == "u4":
+        check("审计新增 u4 显示真实已读 99（未被压成 20）", "已读 99" in out,
+              "out=%s" % out[:90])
 
 print("\n===== BUG-3：英文 prompt 也能识别（输出仍为中文）=====")
 en_ask = ["do not ask me again", "don't ask me", "stop asking me",

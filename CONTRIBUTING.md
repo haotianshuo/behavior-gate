@@ -17,21 +17,25 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **306 项** = 12 套功能测试 306；检查器自身 20 项另计）：
+提交前必须全部通过（共 **450 项** = 16 套功能测试 450；检查器自身 20 项另计）：
 
 ```bash
-python tests/four_gate_selftest.py        # 54/54
+python tests/four_gate_selftest.py        # 57/57
 python tests/cmd_chain_test.py            # 21/21
 python tests/adversarial_test.py          # 25/25
-python tests/budget_safety_test.py        # 38/38
-python tests/intent_gate_test.py          # 21/21
+python tests/budget_safety_test.py        # 44/44
+python tests/intent_gate_test.py          # 43/43
 python tests/upgrade_path_test.py         # 19/19
-python tests/g5_real_regression_test.py   # 25/25  ← 真实会话用例
+python tests/g5_real_regression_test.py   # 37/37  ← 真实会话用例
 python tests/source_identity_consistency_test.py  # 13/13
 python tests/gate_events_test.py          # 33/33
 python tests/g5_windows_path_test.py      # 18/18
 python tests/install_cli_test.py          # 12/12
 python tests/mcp_field_dispatch_test.py   # 27/27
+python tests/g3_attribution_regression_test.py  # 31/31
+python tests/semantic_intent_test.py      # 21/21  ← G7 语义意图（在线层默认跳过）
+python tests/semantic_contract_test.py    # 47/47  ← 输入合同 / 时间预算 / 失败规则（全离线）
+python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（在线层默认跳过）
 python tests/doc_consistency_test.py      # 20/20
 ```
 
@@ -126,7 +130,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 306 项测试全部通过
+[ ] 450 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 如改了 hook，已刷新源身份（tools/source_identity.py --write）
@@ -156,7 +160,7 @@ Closes #31
 
 ```text
 [ ] 1. 确认工作区干净、测试全过
-        python tests/*.py            # 306 项
+        python tests/*.py            # 450 项
         git status --short           # 应为空
 
 [ ] 2. 升版本号（改 hook 就必须升）
