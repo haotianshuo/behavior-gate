@@ -198,6 +198,30 @@ def main():
               "rc=%d rule=%s" % (rc, rule),
               "ce-code-review #2：写入侧不得回退")
 
+    # ---------- 审计新增（2026-09-29 · 第二轮）：写入侧根等价写法（A1 修复的回归锁）----------
+    #
+    # 背景：执行侧的"尾随斜杠/引号"容忍此前未同步到写入侧 —— Write/NotebookEdit
+    # 内容里的 `rm -rf ~/`、`rm -rf $HOME/` 漏拦（实跑 3 例 rc=0，且回溯确认
+    # v3.5.0 起就存在）。修复把『根等价后缀』提为共享判据（见 _ROOT_EQ_TAIL 注释）。
+    print("\n----- 审计新增2｜写入侧根等价写法（A1）-----")
+    WRITE_POS = [
+        (RM + " -rf ~" + "/\n", "尾随斜杠 ~/"),
+        (RM + " -rf $" + "HOME" + "/\n", "$HOME 加尾斜杠"),
+        (RM + " -rf \"" + "$" + "HOME" + "\"/\n", "引号包裹 + 尾斜杠"),
+    ]
+    for content, note in WRITE_POS:
+        rc, rule = run_gate("Write", {"file_path": "x", "content": content}, tmp)
+        check("审计新增2 写入侧应拦 %-22s" % note, rc == 2 and rule == "rm_rf_in_content",
+              "rc=%d rule=%s" % (rc, rule),
+              "A1：写入侧尾缀未跟上执行侧（第二轮三验发现）")
+    # 反例配对：带子路径与句中提及不得被误拦
+    for content, note in ((RM + " -rf ~" + "/proj\n", "带子路径 ~/proj"),
+                          ("说明：" + RM + " -rf ~" + "/ 是危险写法\n", "句中提及（非行首）")):
+        rc, rule = run_gate("Write", {"file_path": "x", "content": content}, tmp)
+        check("审计新增2 写入侧应放 %-22s" % note, rule is None,
+              "rc=%d rule=%s" % (rc, rule),
+              "A1 反例配对（放宽尾缀的误伤检查）")
+
     # ---------- 字段语义不变量 ----------
     print("\n----- 字段语义不变量（cmd_deny 不作用于写入内容）-----")
     rc, rule = run_gate("mcp__filesystem__write_file",

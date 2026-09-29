@@ -16,20 +16,42 @@ import pathlib
 import re
 import sys
 
-# Python 标准库模块白名单（本项目实际用到的）
-ALLOWED = {
-    "argparse", "collections", "concurrent", "copy", "dataclasses", "datetime",
-    "enum", "functools", "hashlib", "importlib", "io", "itertools", "json",
-    "math", "os", "pathlib", "platform", "random", "re", "shutil", "socket",
-    "stat", "string", "subprocess", "sys", "tempfile", "textwrap", "threading",
-    "time", "traceback", "typing", "uuid", "warnings", "winreg",
-    "unittest", "zipfile", "collections.abc",
-}
+# ⚠️⚠️ 两张白名单已改为【运行时构建】——不再手写。
+#
+# 根因（2026-09-29 复盘，v3.5.16 发布后 CI 六矩阵全红）：
+#   原实现手写 ALLOWED（标准库）与 LOCAL（本地模块）两张表。
+#   v3.5.16 新增 review_unit.py 用了 urllib/http、且被 effect_gate 等 import——
+#   两张表都没跟上 → 第一步"确认零第三方依赖"失败 → 六平台矩阵全部红灯，
+#   后续 16 个测试套件全被 SKIPPED（发布证据链断裂）。
+#   教训：手写表的失效模式不是"写错"，而是"没人记得更新"。
+#   消除这一整类问题的方式不是把表补全，而是【取消手写表】。
+#
+# 借鉴（只取思想，未复制任何实现）：
+#   · 标准库清单交给解释器自带的权威列表（sys.stdlib_module_names，3.10+）；
+#   · 本地模块 = 仓库内所有 .py 的模块名（自动发现）。
+#   两者都做到"新增文件零维护"。
 
-# 本项目内部模块
-# （加新模块时记得同时加到这里 —— 否则 CI 会把它误报成第三方依赖）
-LOCAL = {"_lib", "deploy_files", "find_python", "intent_gate",
-         "src_identity", "console_utf8", "source_identity"}
+
+def _stdlib_modules():
+    """解释器自带的权威标准库清单（Python 3.10+）。"""
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is None:
+        # 老解释器没有这份清单。明确失败，而不是回退到手写表
+        # （回退等于把这个缺陷原样保留）。
+        sys.stderr.write(
+            "[check_no_deps] need Python 3.10+ (sys.stdlib_module_names)\n")
+        raise SystemExit(2)
+    return set(names)
+
+
+def _local_modules(root):
+    """本项目内部模块：仓库内所有 .py 的模块名（自动发现）。"""
+    mods = set()
+    for p in root.rglob("*.py"):
+        if {"__pycache__", ".venv", "venv", "build", "dist"} & set(p.parts):
+            continue
+        mods.add(p.stem)
+    return mods
 
 IMPORT_RE = re.compile(r"\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -76,6 +98,8 @@ def main():
         pass
 
     root = pathlib.Path(__file__).resolve().parents[2]
+    stdlib = _stdlib_modules()
+    local = _local_modules(root)
     bad = []
     scanned = 0
 
@@ -95,7 +119,7 @@ def main():
             if not m:
                 continue
             mod = m.group(1)
-            if mod not in ALLOWED and mod not in LOCAL:
+            if mod not in stdlib and mod not in local:
                 bad.append((str(path.relative_to(root)), mod))
 
     print("[check_no_deps] scanned %d python files" % scanned)

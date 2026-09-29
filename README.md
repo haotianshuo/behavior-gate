@@ -2,7 +2,7 @@
 
 > 给 Claude Code 加五道**机械门**，治「AI 助手想多做、做了却说完成了」这类毛病。
 >
-> 当前版本：**V3.5.16** ｜ 2026-09-27
+> 当前版本：**V3.5.16** ｜ 2026-09-29
 > 许可证：[MIT](LICENSE)
 
 ---
@@ -136,7 +136,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **450 项**全过 —— 16 套功能测试 450，外加本检查器自身 20 项）：
+跑测试（预期 **455 项**全过 —— 16 套功能测试 455，外加本检查器自身 20 项）：
 
 ```bash
 python tests/four_gate_selftest.py        # 57/57
@@ -145,7 +145,7 @@ python tests/adversarial_test.py          # 25/25
 python tests/budget_safety_test.py        # 44/44
 python tests/intent_gate_test.py          # 43/43
 python tests/upgrade_path_test.py         # 19/19
-python tests/g5_real_regression_test.py   # 37/37  ← 真实会话挖出的用例
+python tests/g5_real_regression_test.py   # 42/42  ← 真实会话挖出的用例
 python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
 python tests/gate_events_test.py          # 33/33  ← Gate 事件记录
 python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
@@ -341,7 +341,7 @@ python install.py --rollback
 ```
 ├─ install.py                      安装（双作用域，幂等）
 ├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（99 项真实问题）
+├─ CHANGELOG.md                    变更记录（120 项真实问题）
 ├─ BASELINE.md                     已验证基线（冻结状态）
 ├─ policy/behavior-policy.json     策略内核（工具无关）
 ├─ adapters/claude-code/
@@ -350,7 +350,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十七套测试（450 项，含真实回归）
+└─ tests/                          十七套测试（455 项，含真实回归）
 ```
 
 ---

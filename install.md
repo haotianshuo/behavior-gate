@@ -1,16 +1,16 @@
 # 行为门安装说明
 
-> 对应版本：**V3.5.16** ｜ 2026-09-27
+> 对应版本：**V3.5.16** ｜ 2026-09-29
 >
 > ⚠️ **它证明不了什么，和它能拦什么同样重要 —— 见下面的「已知边界」。**
 > 一句话：门管的是「行动方式」和「格式」，不是「判断对不对」。
 > `判定: MATCH` / `自检通过` / `证据：L3` 都**不等于**内容已被核实。
 > 当前实测：四关 54/54、安装链路 21/21、对抗 25/25、预算安全 38/38、
-> 　　　　　意图门 43/43、升级路径 19/19、G5 真实回归 37/37、
+> 　　　　　意图门 43/43、升级路径 19/19、G5 真实回归 42/42、
 > 　　　　　源身份一致性 13/13、Gate 事件 33/33、Windows 路径 18/18、
 > 　　　　　安装参数 12/12、MCP 字段分派 27/27、G3 归属回归 31/31、
 > 　　　　　语义意图 21/21、G3 语义归属 2/2、
-> 　　　　　语义合同 47/47（=450 项）
+> 　　　　　语义合同 47/47（=455 项）
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -62,7 +62,7 @@ python tests/adversarial_test.py          # 期望 25/25
 python tests/budget_safety_test.py        # 期望 44/44
 python tests/intent_gate_test.py          # 期望 43/43
 python tests/upgrade_path_test.py         # 期望 19/19
-python tests/g5_real_regression_test.py   # 期望 37/37  ← 真实会话用例
+python tests/g5_real_regression_test.py   # 期望 42/42  ← 真实会话用例
 python tests/source_identity_consistency_test.py  # 期望 13/13
 python tests/gate_events_test.py          # 期望 33/33
 python tests/g5_windows_path_test.py      # 期望 18/18
@@ -75,7 +75,7 @@ python tests/semantic_g3_test.py          # 期望 2/2（在线层默认跳过�
 python tests/doc_consistency_test.py      # 期望 20/20
 ```
 
-**合计 450 项**（16 套功能测试；`doc_consistency_test` 是检查器，不计入）。
+**合计 455 项**（16 套功能测试；`doc_consistency_test` 是检查器，不计入）。
 也可以一次跑完：
 
 ```bash
@@ -218,7 +218,7 @@ MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd �
 │   └─ hooks/                      _lib + 5 个门 + review_unit（语义评审）+ VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          十七套测试（=450 项）
+└─ tests/                          十七套测试（=455 项）
 ```
 
 ### 五道门
