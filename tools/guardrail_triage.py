@@ -98,13 +98,24 @@ def cmd_sample(args):
     with open(out, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh)
         # verdict 列留空待填：true_block / false_positive / unclear
+        # ⚠️ 2026-09-30（评估口径更正后补齐追溯信息）：
+        #    · session 用【完整值】（原 [:12]+"…" 无法回溯到具体会话）
+        #    · 新增 source_snapshot 列（快照标签；身份可信度继承自部署校验，
+        #      未经 verify_deploy 核验时视为「身份未核实」）
+        #    · source_class 保留原值但加注：默认即 NATURAL（_lib.py:207），
+        #      **不能证明业务用途** —— 用途分类请填 purpose 列并写明依据
+        #    · 新增 evidence 列（默认给 ts，供标注时指回原始记录）
         w.writerow(["#", "ts", "gate_id", "rule_id", "tool",
-                    "session", "source_class", "verdict", "note"])
+                    "session", "source_snapshot", "source_class_note",
+                    "purpose", "evidence", "verdict", "note"])
         for i, e in enumerate(picked, 1):
             w.writerow([i, e.get("ts", ""), e.get("gate_id", ""),
                         e.get("rule_id", ""), e.get("tool", ""),
-                        (e.get("session") or "")[:12] + "…",
-                        e.get("source_class", ""), "", ""])
+                        e.get("session") or "",
+                        e.get("source_snapshot") or "",
+                        (e.get("source_class", "") + "（默认值≠业务用途）"),
+                        "", e.get("ts", ""),
+                        "", ""])
     print("[triage] 共 %d 条出手事件，随机抽取 %d 条（seed=%d）" %
           (len(hits), n, args.seed))
     print("[triage] 已写出：%s" % out)
@@ -122,13 +133,20 @@ def cmd_score(args):
         print("[triage] 找不到 %s（先跑 sample）" % p)
         return 1
     rows = list(csv.DictReader(open(p, encoding="utf-8-sig")))
-    # 按门/按规则分组统计
+    # ⚠️ 2026-09-30 修（评分混快照/混用途）：评分必须按
+    #    【cohort = 快照 × 用途】分组 —— 修前只按门/规则汇总，两个快照
+    #    （一个全正确、一个全误报）会被合成一个 50% 的精确率数字，而它
+    #    不代表其中任何一个版本。按门/规则的输出保留，但标为「历史混合汇总」。
     by_gate = {}
     by_rule = {}
+    by_cohort = {}
     for r in rows:
         v = (r.get("verdict") or "").strip().lower()
+        snap = (r.get("source_snapshot") or "<缺失>")[:12]
+        purp = (r.get("purpose") or "").strip() or "<用途未填>"
         for bucket, key in ((by_gate, r.get("gate_id") or "?"),
-                            (by_rule, r.get("rule_id") or "?")):
+                            (by_rule, r.get("rule_id") or "?"),
+                            (by_cohort, "%s | %s" % (snap, purp))):
             b = bucket.setdefault(key, {"true": 0, "false": 0, "unclear": 0})
             if v == "true_block":
                 b["true"] += 1
@@ -158,9 +176,23 @@ def cmd_score(args):
     print("=" * 60)
     print("抽样复核结果（样本 %d 条，已标注 %d 条，未标注 %d 条）"
           % (total, judged, total - judged))
+    # ⚠️ 2026-09-30 第二轮修（cohort 缺时间窗）：同一快照 + 同一用途的
+    #    不同时段此前会合并 —— 结果不得直接称为「当前表现」。
+    #    最小修法：显式记录样本时间范围并提示边界（不改抽样口径）。
+    _tss = sorted((r.get("ts") or "") for r in rows if (r.get("ts") or ""))
+    _span = ("%s → %s" % (_tss[0][:16], _tss[-1][:16])) if _tss else "(无时间戳)"
+    print("样本时间范围: %s" % _span)
+    print("⚠️ 以上数字只限该时间窗内；不得当作任意时段或「当前表现」引用。")
     print("=" * 60)
-    report("按门", by_gate)
-    report("按规则", by_rule)
+    report("按 cohort（快照 × 用途）—— 判定效果的有效分组", by_cohort)
+    n_snap = len({(r.get("source_snapshot") or "<缺失>")[:12] for r in rows})
+    if n_snap > 1:
+        note = ("（⚠️ 跨 %d 个快照 → 下方按门/按规则是【历史混合汇总】，"
+                "不代表任何单个版本；结论请以上方 cohort 分组为准）" % n_snap)
+    else:
+        note = ""
+    report("按门（历史混合汇总，仅参考）" + note, by_gate)
+    report("按规则（历史混合汇总，仅参考）", by_rule)
     print("─" * 60)
     print("⚠️ 这是【样本估计】——区间随样本量收窄；要更紧的区间就多抽一些（sample 再跑大 n）。")
     return 0
