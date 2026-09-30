@@ -33,6 +33,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (  # noqa: E402
     read_input, deny, allow, warn_inactive, state_path, load_state,
+    load_state_strict,
     strip_referenced_text,
 )
 
@@ -652,7 +653,17 @@ def main():
     ti = data.get("tool_input") or {}
 
     sp = state_path(session_id, "budget")
-    st = load_state(sp) or {}
+    # ⚠️ 审计修复（2026-09-30）：读失败（文件存在但读取/解析失败）必须可见 ——
+    #    修前静默返回 {}，既有禁令全部丢失且用户零感知（受控实测：状态损坏 /
+    #    路径为目录 / 空文件 → 均 rc=0、stderr 空）。用已有的 load_state_strict
+    #    区分两种情况（它本就是为并发读失败写的）：
+    #      · 文件不存在 → 首次使用，正常，不告警（安静原则）
+    #      · 读失败     → 明确告警（既有约束可能丢失）
+    #    只加披露，不改放行策略。
+    st, _st_ok = load_state_strict(sp)
+    if not _st_ok:
+        warn_inactive("G7 意图门",
+                      "状态文件存在但无法读取/解析，本轮【既有约束可能丢失】：%s" % sp)
     no_ask = bool(st.get("intent_no_ask"))
     no_verify = bool(st.get("intent_no_verify"))
     # 3.5.17：提示必须引用【本会话】的真实来源，不能写死历史原话。

@@ -232,7 +232,18 @@ def main():
         _forbids.append("不要向你提问" + ("（依据原话「%s」）" % ask_frag
                                           if ask_frag else "（无来源片段）"))
     if _forbids:
-        intent_lines.append("  已记录本会话要求：%s" % "；".join(_forbids))
+        # ⚠️ 审计修复（2026-09-30）：直接使用本函数已有的写入结果 saved ——
+        #    修前无论写入成败都宣称"已记录"，而同一轮 stderr 却报
+        #    STATE_SAVE_FAILED（受控实测：状态里 intent_no_verify=None），
+        #    且后续工具检查确实不再受该禁令约束（同轮/跨轮均 rc=0、无提示）。
+        #    这里只修【披露】：不改"写失败仍放行"的既定策略。
+        if saved:
+            intent_lines.append("  已记录本会话要求：%s" % "；".join(_forbids))
+        else:
+            intent_lines.append(
+                "  ⚠️ 本会话要求【未能保存】（%s）——"
+                "后续工具检查可能无法执行该要求：%s"
+                % (_res, "；".join(_forbids)))
     # ⚠️ 「关闭」与「故障」分开说 —— 用户要能分清"我关的"和"它坏了"。
     _src = str(intent_state.get("intent_source") or "")
     if intent_state.get("intent_degraded"):
