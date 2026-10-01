@@ -102,11 +102,41 @@ def main():
 
     # ---------- 已知参数不该被误报 ----------
     print("\n----- 已知参数不该被误报 -----")
-    for okarg in ["--apply", "--force", "--rollback"]:
+    for okarg in ["--apply", "--force"]:
         rc, out = run([okarg, "--help"] if okarg != "--apply" else ["--apply"])
         check("%-12s 不被判为未知" % okarg,
               "无法识别" not in out,
               out[:80])
+
+    # ---------- --rollback 必须明确拒绝，不得进入安装路径 ----------
+    # 修前：它在 KNOWN_FLAGS 里，但全文件没有任何处理分支 ——
+    #   `--rollback` 单独用 = 静默预演（用户以为回滚了，实际什么都没做）
+    #   `--rollback --apply` = 静默走安装（用户以为在回滚，实际在覆盖！）
+    # 本组断言两件事：① 非零退出且明说不支持；② 未进入安装路径
+    #（判据：无安装标志输出，且目标目录未生成 .claude/）。
+    # ⚠️ 危险组合只在隔离夹具里跑：cwd 是新建的临时子目录，
+    #    HOME/USERPROFILE 已被 run() 指向临时目录。
+    print("\n----- --rollback：明确拒绝，不进入安装路径 -----")
+    for combo in (["--rollback"],
+                  ["--rollback", "--apply"],
+                  ["--rollback", "--force"]):
+        rb = tempfile.mkdtemp(prefix="rollback-", dir=_TMP)
+        rc, out = run(combo, cwd=rb)
+        label = " ".join(combo)
+        check("%-20s 非零 + 明说不支持" % label,
+              rc != 0 and "不支持" in out,
+              "rc=%d 含'不支持'=%s" % (rc, "不支持" in out))
+        wrote = os.path.exists(os.path.join(rb, ".claude"))
+        check("%-20s 未进入安装路径" % label,
+              "行为门安装" not in out and not wrote,
+              "含安装标志=%s / 生成 .claude=%s"
+              % ("行为门安装" in out, wrote))
+
+    # ---------- 帮助文本不得再把 --rollback 写成可用能力 ----------
+    rc, out = run(["--bogus"])
+    check("帮助文本不再列出 --rollback",
+          "--rollback" not in out,
+          out[:80])
 
     # ---------- README 不再写错用法 ----------
     print("\n----- 文档一致性 -----")
@@ -115,6 +145,8 @@ def main():
           "--apply --global" not in readme)
     check("README 含正确写法 '--scope global'",
           "--scope global" in readme)
+    check("README 不再把 --rollback 写成可用命令",
+          "install.py --rollback" not in readme)
 
     # ---------- 隔离性：测试不能污染仓库 ----------
     print("\n----- 隔离性：仓库目录不得被测试写入 -----")

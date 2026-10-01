@@ -158,7 +158,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **486 项**全过 —— 18 套功能测试 486，外加本检查器自身 20 项）：
+跑测试（预期 **493 项**全过 —— 18 套功能测试 493，外加本检查器自身 20 项）：
 
 ```bash
 python tests/four_gate_selftest.py        # 57/57
@@ -171,7 +171,7 @@ python tests/g5_real_regression_test.py   # 42/42  ← 真实会话挖出的用�
 python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
 python tests/gate_events_test.py          # 33/33  ← Gate 事件记录
 python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
-python tests/install_cli_test.py          # 12/12  ← 安装参数回归
+python tests/install_cli_test.py          # 19/19  ← 安装参数回归（含 --rollback 拒绝）
 python tests/mcp_field_dispatch_test.py   # 27/27  ← MCP 字段分派
 python tests/g3_attribution_regression_test.py  # 31/31  ← G3 归属误报/漏拦回归
 python tests/semantic_intent_test.py      # 21/21  ← G7 语义意图（离线层）
@@ -358,11 +358,15 @@ T3  多方审计 / 第三方不可抵赖
 
 ## 回滚
 
-```bash
-python install.py --rollback
-```
+⚠️ **`--rollback` 不受支持。** 本安装器没有自动回滚能力 ——
+传入该参数会被直接拒绝（非零退出），不会进入安装或预演路径。
 
-安装时会在 `.claude/` 下留 `.bak-<时间戳>` 备份。
+**人工恢复方式（⚠️ 未经自动化测试验证，仅供参照）：**
+
+- 安装时会在配置目录留 `.bak-<时间戳>` 备份，可手工比对恢复；
+- `DEPLOY_MANIFEST.json` 记录了部署文件与哈希，可用于核对外来改动。
+
+需要回滚时请手工操作；自动回滚不在本包的能力范围内。
 
 ---
 
@@ -380,7 +384,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十九套测试（486 项，含真实回归）
+└─ tests/                          十九套测试（493 项，含真实回归）
 ```
 
 ---
