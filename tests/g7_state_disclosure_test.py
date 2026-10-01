@@ -33,6 +33,17 @@ HOOKS = os.path.join(ROOT, "adapters", "claude-code", "hooks")
 POLICY = os.path.join(ROOT, "policy", "behavior-policy.json")
 PY = sys.executable
 
+# stdout / stderr 固定为 UTF-8 —— Windows 控制台默认 GBK（cp936）。
+# doc_consistency_test 用 decode("utf-8") 抓本套件的 "N/N 通过" 行，
+# 不设时输出 GBK → 「通过」变替换字符 → 正则不命中 → 该套件被计 0，
+# 进而让「文档里的 N 项」与合计值全部误报（实测：486 被算成 471）。
+# 同族写法见 four_gate_selftest / install_cli_test 等套件。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 FAILED = []
 PASSED = []
 
