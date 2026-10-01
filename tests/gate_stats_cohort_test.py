@@ -36,13 +36,13 @@ import gate_stats as gs  # noqa: E402
 
 PY = sys.executable
 FAILED = []
+PASSED = []
 
 
 def check(label, ok, detail=""):
     print("  %s %s%s" % ("PASS" if ok else "FAIL", label,
                          ("  " + str(detail)) if detail else ""))
-    if not ok:
-        FAILED.append(label)
+    (PASSED if ok else FAILED).append(label)
 
 
 def rec(ts, sid, snap, gate="G5", rule="r1"):
@@ -134,12 +134,13 @@ def main():
     check("提示不得当作任意时段引用", "不得当作任意时段" in out)
 
     print()
+    total = len(PASSED) + len(FAILED)
+    print("统计工具 cohort 口径回归：%d / %d 通过" % (len(PASSED), total))
     if FAILED:
-        print("失败 %d 项：" % len(FAILED))
+        print("失败项：")
         for x in FAILED:
             print("  - %s" % x)
         return 1
-    print("全部通过。")
     return 0
 
 

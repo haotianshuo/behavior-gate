@@ -80,6 +80,12 @@ jobs:
       - name: 语义输入合同 / 时间预算 / 失败规则
         run: python tests/semantic_contract_test.py
 
+      - name: 状态故障披露（G7 读失败 / 写失败卡片）
+        run: python tests/g7_state_disclosure_test.py
+
+      - name: 统计工具 cohort 口径
+        run: python tests/gate_stats_cohort_test.py
+
       - name: 文档数字一致性
         run: python tests/doc_consistency_test.py
 

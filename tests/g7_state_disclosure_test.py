@@ -34,18 +34,39 @@ POLICY = os.path.join(ROOT, "policy", "behavior-policy.json")
 PY = sys.executable
 
 FAILED = []
+PASSED = []
 
 
 def check(label, ok, detail=""):
     print("  %s %s%s" % ("PASS" if ok else "FAIL", label,
                          ("  " + str(detail)) if detail else ""))
-    if not ok:
-        FAILED.append(label)
+    (PASSED if ok else FAILED).append(label)
+
+
+def offline_policy(tmpdir):
+    """确定性夹具：关闭语义评审的策略副本（不依赖凭据 / 网络 / 模型）。
+
+    ⚠️ 为什么必须关（修于 2026-09-30，朋友方复核指出）：
+        本测试断言的是【披露文字】（"已记录" / "未能保存" / 告警句）。
+        若沿用启用语义评审的正式策略，离线运行时走 hold-on-failure
+        —— 不新增禁令 —— "不要测试"就不会形成约束，卡片自然不出现
+        被断言的文字；结果随通道可用性而变，测试不确定。
+        项目测试分层约定：程序逻辑测试一律用【关闭语义评审的隔离策略】。
+    """
+    pol = json.load(open(POLICY, encoding="utf-8"))
+    pol.setdefault("semantic_review", {})["enabled"] = False
+    dst = os.path.join(tmpdir, "policy_offline.json")
+    with open(dst, "w", encoding="utf-8") as f:
+        json.dump(pol, f, ensure_ascii=False)
+    return dst
+
+
+POL_OVERRIDE = None      # main() 里指向确定性夹具（关闭语义的策略副本）
 
 
 def call(hook, payload, sd):
     env = dict(os.environ)
-    env["CLAUDE_BEHAVIOR_POLICY"] = POLICY
+    env["CLAUDE_BEHAVIOR_POLICY"] = POL_OVERRIDE or POLICY
     env["CLAUDE_BUDGET_STATE_DIR"] = sd
     p = subprocess.run([PY, os.path.join(HOOKS, hook)],
                        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -66,6 +87,10 @@ def fresh():
 
 
 def main():
+    global POL_OVERRIDE
+    POL_OVERRIDE = offline_policy(tempfile.mkdtemp(prefix="g7disc-pol-"))
+    print("夹具：关闭语义评审的策略副本（确定性，不依赖模型/网络）")
+    print()
     print("=" * 62)
     print("G7 读状态披露（rc / stderr / 安静性）")
     print("=" * 62)
@@ -141,12 +166,13 @@ def main():
         pass
 
     print()
+    total = len(PASSED) + len(FAILED)
+    print("G7 状态披露回归：%d / %d 通过" % (len(PASSED), total))
     if FAILED:
-        print("失败 %d 项：" % len(FAILED))
+        print("失败项：")
         for x in FAILED:
             print("  - %s" % x)
         return 1
-    print("全部通过。")
     return 0
 
 

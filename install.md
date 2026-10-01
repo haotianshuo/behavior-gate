@@ -10,7 +10,7 @@
 > 　　　　　源身份一致性 13/13、Gate 事件 33/33、Windows 路径 18/18、
 > 　　　　　安装参数 12/12、MCP 字段分派 27/27、G3 归属回归 31/31、
 > 　　　　　语义意图 21/21、G3 语义归属 2/2、
-> 　　　　　语义合同 47/47（=455 项）
+> 　　　　　语义合同 47/47（=486 项）
 > 定位：**可以 Shadow 试跑；不建议直接全局安装**
 >
 > 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
@@ -72,10 +72,12 @@ python tests/g3_attribution_regression_test.py  # 期望 31/31
 python tests/semantic_intent_test.py      # 期望 21/21（在线层默认跳过；开启后 +5）
 python tests/semantic_contract_test.py    # 期望 47/47（本地假模型，全离线）
 python tests/semantic_g3_test.py          # 期望 2/2（在线层默认跳过；另 1 项 KNOWN-UNRESOLVED）
+python tests/g7_state_disclosure_test.py  # 期望 15/15
+python tests/gate_stats_cohort_test.py    # 期望 16/16
 python tests/doc_consistency_test.py      # 期望 20/20
 ```
 
-**合计 455 项**（16 套功能测试；`doc_consistency_test` 是检查器，不计入）。
+**合计 486 项**（18 套功能测试；`doc_consistency_test` 是检查器，不计入）。
 也可以一次跑完：
 
 ```bash
@@ -218,7 +220,7 @@ MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd �
 │   └─ hooks/                      _lib + 5 个门 + review_unit（语义评审）+ VERSION
 ├─ lib/                            共用模块（部署清单 / Python 探测）
 ├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          十七套测试（=455 项）
+└─ tests/                          十九套测试（=486 项）
 ```
 
 ### 五道门

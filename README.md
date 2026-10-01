@@ -158,7 +158,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **455 项**全过 —— 16 套功能测试 455，外加本检查器自身 20 项）：
+跑测试（预期 **486 项**全过 —— 18 套功能测试 486，外加本检查器自身 20 项）：
 
 ```bash
 python tests/four_gate_selftest.py        # 57/57
@@ -181,6 +181,8 @@ python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（离线�
 > 两个 `semantic_*` 套件的**在线层默认跳过**（`BEHAVIOR_GATE_ONLINE=1` 开启真实调用）。
 > 跳过的项**不计入**上面的数字 —— 「没跑」不写成「通过」。
 > 在线层的真实调用结果单独留档（G7 5/5、G3 4/4，含 real_03）。
+python tests/g7_state_disclosure_test.py  # 15/15  ← 状态故障披露（G7 读失败 / 写失败卡片）
+python tests/gate_stats_cohort_test.py    # 16/16  ← 统计工具 cohort 口径
 python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
 ```
 
@@ -191,7 +193,7 @@ python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
 
 ### 怎么验证「门真的在拦」（不是「代码逻辑对」）
 
-上面 17 套测试验的是**代码逻辑**。它们全绿，**不代表门真的会拦住你**。
+上面 19 套测试验的是**代码逻辑**。它们全绿，**不代表门真的会拦住你**。
 
 要验证门的**实际行为**，用真实部署的 hook 喂真实输入，看退出码：
 
@@ -378,7 +380,7 @@ python install.py --rollback
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十七套测试（455 项，含真实回归）
+└─ tests/                          十九套测试（486 项，含真实回归）
 ```
 
 ---

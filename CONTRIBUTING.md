@@ -17,7 +17,7 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **455 项** = 16 套功能测试 455；检查器自身 20 项另计）：
+提交前必须全部通过（共 **486 项** = 18 套功能测试 486；检查器自身 20 项另计）：
 
 ```bash
 python tests/four_gate_selftest.py        # 57/57
@@ -36,6 +36,8 @@ python tests/g3_attribution_regression_test.py  # 31/31
 python tests/semantic_intent_test.py      # 21/21  ← G7 语义意图（在线层默认跳过）
 python tests/semantic_contract_test.py    # 47/47  ← 输入合同 / 时间预算 / 失败规则（全离线）
 python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（在线层默认跳过）
+python tests/g7_state_disclosure_test.py  # 15/15  ← 状态故障披露
+python tests/gate_stats_cohort_test.py    # 16/16  ← 统计工具 cohort 口径
 python tests/doc_consistency_test.py      # 20/20
 ```
 
@@ -130,7 +132,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 455 项测试全部通过
+[ ] 486 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 如改了 hook，已刷新源身份（tools/source_identity.py --write）
@@ -162,7 +164,7 @@ Closes #31
 [ ] 1. 确认工作区干净、预检全绿
         python tools/preflight_release.py   # CI 本机等价步骤 + 全套件（一条命令）
         git status --short                  # 应为空
-        ⚠️ preflight 是 2026-09-29 补的：v3.5.16 那次「本机跑了 455 项」，
+        ⚠️ preflight 是 2026-09-29 补的：v3.5.16 那次「本机把当时的全部套件跑通了（455 个用例）」，
            但漏跑了 CI 里的检查器（check_no_deps 白名单没跟上新模块）→
            CI 六矩阵全红、后续测试全被 SKIPPED。检查清单写进工具，比写在人脑可靠。
 
