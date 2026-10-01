@@ -75,10 +75,55 @@ def offline_policy(tmpdir):
 POL_OVERRIDE = None      # main() 里指向确定性夹具（关闭语义的策略副本）
 
 
-def call(hook, payload, sd):
+def _fault_injector(statedir, target_name):
+    """受控故障注入：仅让【目标文件名】的 _lib.save_state 返回 False。
+
+    为什么需要（2026-10-01，CI 四红坐实）：
+        修前用 os.chmod(f, stat.S_IREAD) 把目标状态文件设为只读。
+        Windows 上只读属性会阻止 os.replace —— 故障确实发生；
+        但 POSIX 的 rename(2) 只检查【目录】写权限、不检查目标文件权限，
+        于是原子替换顺利成功、故障根本没制造出来
+        （CI: ubuntu/macos 4 个 job 红，Windows 2 个 job 绿）。
+
+    修法：用标准库的 sitecustomize 机制，在【子进程启动时】替换
+        _lib.save_state —— 跨平台一致，且下面的链路全部仍走真实实现：
+            获取锁 → 读取有效状态 → 合并本轮意图 → 保存失败判定 → 披露。
+
+    边界（刻意收窄，别放宽）：
+        · 只 patch _lib.save_state；不改产品源码、不加运行时测试开关；
+        · 只对 basename == target_name 生效 —— 其他状态文件走原函数；
+        · 注入文件落在【隔离临时目录】，经 PYTHONPATH 注入子进程；
+        · 不读凭据、不调模型。
+    """
+    with open(os.path.join(statedir, "sitecustomize.py"),
+              "w", encoding="utf-8") as f:
+        f.write(
+            "# 测试夹具：受控故障注入（不改产品源码）\n"
+            "import os, sys\n"
+            "_H = os.environ.get('G7FAULT_HOOKS') or ''\n"
+            "_T = os.environ.get('G7FAULT_TARGET') or ''\n"
+            "if _H and _T:\n"
+            "    if _H not in sys.path:\n"
+            "        sys.path.insert(0, _H)\n"
+            "    import _lib\n"
+            "    _real = _lib.save_state\n"
+            "    def save_state(path, data, *a, **kw):\n"
+            "        if os.path.basename(path) == _T:\n"
+            "            return False\n"
+            "        return _real(path, data, *a, **kw)\n"
+            "    _lib.save_state = save_state\n")
+
+
+def call(hook, payload, sd, fail_save=None):
     env = dict(os.environ)
     env["CLAUDE_BEHAVIOR_POLICY"] = POL_OVERRIDE or POLICY
     env["CLAUDE_BUDGET_STATE_DIR"] = sd
+    if fail_save:
+        _fault_injector(sd, fail_save)
+        _pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (sd + os.pathsep + _pp) if _pp else sd
+        env["G7FAULT_HOOKS"] = HOOKS
+        env["G7FAULT_TARGET"] = fail_save
     p = subprocess.run([PY, os.path.join(HOOKS, hook)],
                        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=90)
@@ -155,26 +200,31 @@ def main():
     print("=" * 62)
     print("inject_budget 写失败披露")
     print("=" * 62)
+    # 受控故障注入（跨平台一致）—— 见 _fault_injector 的说明。
+    # 修前用 chmod 只读：Windows 有效、POSIX 无效（rename 只看目录权限），
+    # 故障根本没发生。这里让保存环节【确定性地】失败，其余链路保持真实。
     d = fresh()
     f = os.path.join(d, "n.budget.json")
     json.dump({"session_id": "n"}, open(f, "w", encoding="utf-8"))
-    os.chmod(f, stat.S_IREAD)
     rc, out, err = call(IB, {"session_id": "n", "hook_event_name": "UserPromptSubmit",
-                             "prompt": "不要测试"}, d)
+                             "prompt": "不要测试"}, d, fail_save="n.budget.json")
     check("写失败 → 不宣称『已记录本会话要求』", "已记录本会话要求" not in out)
     check("写失败 → 明说『未能保存』", "未能保存" in out)
     check("写失败 → 仍有 STATE_SAVE_FAILED（既有告警未回归）",
           "STATE_SAVE_FAILED" in err, err.splitlines()[0][:60] if err else "(空)")
-    # 对照：可写时仍正常宣称已记录
+    # ⚠️ 命中校验：不能只凭输出相符就判通过 ——
+    #    若注入没落到位，本组可能"看起来像失败"而实际走了别的路径。
+    #    「失败后新禁令不得落盘」是可独立核对的状态侧证据。
+    _st = json.load(open(f, encoding="utf-8"))
+    check("写失败 → 新禁令未落盘（注入确实命中保存环节）",
+          _st.get("intent_no_verify") is not True,
+          "intent_no_verify=%r" % _st.get("intent_no_verify"))
+    # 对照：不注入时仍正常宣称已记录
     d2 = fresh()
     rc, out2, _ = call(IB, {"session_id": "n2", "hook_event_name": "UserPromptSubmit",
                             "prompt": "不要测试"}, d2)
     check("写成功 → 仍说『已记录本会话要求』（不误伤）",
           "已记录本会话要求" in out2 and "未能保存" not in out2)
-    try:
-        os.chmod(f, stat.S_IWRITE | stat.S_IREAD)
-    except Exception:
-        pass
 
     print()
     total = len(PASSED) + len(FAILED)

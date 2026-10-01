@@ -158,7 +158,7 @@ verify: on        # 允许跑验证（覆盖「不用测」）
 python tools/verify_deploy.py     # 校验部署完整性
 ```
 
-跑测试（预期 **493 项**全过 —— 18 套功能测试 493，外加本检查器自身 20 项）：
+跑测试（预期 **494 项**全过 —— 18 套功能测试 494，外加本检查器自身 20 项）：
 
 ```bash
 python tests/four_gate_selftest.py        # 57/57
@@ -181,7 +181,7 @@ python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（离线�
 > 两个 `semantic_*` 套件的**在线层默认跳过**（`BEHAVIOR_GATE_ONLINE=1` 开启真实调用）。
 > 跳过的项**不计入**上面的数字 —— 「没跑」不写成「通过」。
 > 在线层的真实调用结果单独留档（G7 5/5、G3 4/4，含 real_03）。
-python tests/g7_state_disclosure_test.py  # 15/15  ← 状态故障披露（G7 读失败 / 写失败卡片）
+python tests/g7_state_disclosure_test.py  # 16/16  ← 状态故障披露（G7 读失败 / 写失败卡片）
 python tests/gate_stats_cohort_test.py    # 16/16  ← 统计工具 cohort 口径
 python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
 ```
@@ -384,7 +384,7 @@ T3  多方审计 / 第三方不可抵赖
 │   └─ hooks/                      _lib + 5 个门 + VERSION
 ├─ lib/                            共用模块
 ├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十九套测试（493 项，含真实回归）
+└─ tests/                          十九套测试（494 项，含真实回归）
 ```
 
 ---
