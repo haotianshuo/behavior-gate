@@ -1,415 +1,321 @@
-# 行为门 BehaviorGate
+# BehaviorGate · 行为门
 
-> 给 Claude Code 加五道**机械门**，治「AI 助手想多做、做了却说完成了」这类毛病。
->
+**为 Claude Code 增加可配置的开发行为约束：控制子代理、检查已知危险操作、尊重询问与测试约定，让完成声明附带可检查的证据。**
+
+[![CI](https://github.com/haotianshuo/behavior-gate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/haotianshuo/behavior-gate/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#运行要求)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 > 当前版本：**V3.5.17** ｜ 2026-10-01
-> 许可证：[MIT](LICENSE)
 
----
+[下载发行包](https://github.com/haotianshuo/behavior-gate/releases/latest) · [快速开始](#快速开始) · [安装与升级](install.md) · [本版更新](docs/releases/v3.5.17.md) · [参与贡献](CONTRIBUTING.md)
 
-## 这是什么
+## 为什么使用 BehaviorGate
 
-一个 Claude Code 的 hooks 集合。它不改变模型的能力，只改变模型的**行动方式**：
+编码助手能完成越来越复杂的工作，但“理解了要求”和“执行时遵守要求”并不是同一件事。你可能只授权了一次修改，助手却开始派生子代理；你说不需要测试，它仍然启动测试；你需要经过验证的结果，却只收到一句“已经完成”。
 
-| 门 | 拦截内容 | 强制力 | 最低核验（怎么证明它真的在拦） |
-|---|---|---|---|
-| **G1 预算门** | 默认不许派子代理；要派必须在消息里写 `agent_spawns: N` | 机械强制 | 无预算行时派 Agent → exit 2；写 `agent_spawns: 2` → exit 0；子代理内再派 → exit 2 |
-| **G3 生效门** | 说「已完成 / 已修复」时必须给证据，否则打回 | 后置打回 | 喂「已完成」→ exit 2；喂证据块 + 风险级别 → exit 0 |
-| **G5 危险门** | `pkill -f`、整行 `rm -rf /` 这类会翻车的写法 | 机械强制 | 喂 `rm -rf /` → exit 2；喂 `ls -la` → exit 0 且**完全静默** |
-| **G7 意图门** | 用户说过「不要再问」仍弹询问、「不用测」仍跑测试 | 机械强制 | 用户说「不要再问」后触发询问 → exit 2 |
-| G6 收口 | 旁路采集（记录派生/写操作，并做用量提示） | 仅记录 | 跑一次核验后 `gate-events.jsonl` 有新增条目 |
+BehaviorGate 把部分开发约定接入 Claude Code 的工具执行与收尾流程。它通过本地 hooks 检查可明确表达的规则，并在需要理解自然语言时使用可关闭的语义评审。
 
-**「强制力」这一列是自评，不是证据。** 判断一个门是否真的生效，看最后一列 ——
-它给出的是**可复现的动作 + 可观察的退出码**，不依赖读源码。
+它的目标是让开发过程更可控、结果更容易核对，**不是代替模型编程，也不是替你判断代码一定正确**。
 
-> ⚠️ **本表的核验状态**：2026-09-21 02:35 用真实部署的 hook 跑过一轮，
-> 四道门 + 观测层全部通过。复现命令见文末「怎么验证它真的在工作」。
-> **门的行为会随版本变化** —— 改动 hook 后必须重跑，不能沿用旧结论。
+### 适合的使用场景
 
-### 语义评审（默认开启 —— 先读这三行）
+- 明确控制子代理的使用范围与数量。
+- 避免助手在你已表达意图后反复询问或擅自启动测试。
+- 让“完成、修复、验证通过”等声明附带位置、方法和未验证项。
+- 在执行前发现部分已知危险命令或误操作模式。
+- 通过本地事件记录复查规则产生的拦截与摩擦。
 
-> ⚠️ 开启时会把**用户本轮原话的相关片段**发到 Claude Code 正在使用的模型通道
-> （跟随 `ANTHROPIC_BASE_URL`，不新增供应商、不发会话历史、不发文件内容、不发凭据）；
-> 每次提交 prompt 触发一次调用（实测中位亚秒级，最坏可超 10 秒）。
-> **一键关闭**：`policy.semantic_review.enabled = false`（回到纯词表，零调用、零延迟）。
+如果需要隔离不可信代码、保护生产数据或建立强制安全边界，应使用宿主权限、沙箱和操作系统级控制；BehaviorGate 只能作为补充。
 
-它做什么：G7 的意图理解与 G3 的声明归属里，「词表修不动」的那一类判断
-（例如「分**别测试**」被词表读成「**别**测试」），交给一次**独立的最小模型调用**——
-独立上下文、只读、无执行权限；失败时**明说降级**（"本轮语义评审未完成"），绝不伪造判断。
+## 核心能力
 
-**建议配成异构评审**：把 `semantic_review.model` 配成与主模型**不同族**的模型。
-依据：LLM 无外部反馈的自我纠错被实测证伪 —— ICLR 2024（arXiv:2310.01798）原文
-*"struggle to self-correct their responses without external feedback"*、
-*"their performance even degrades after self-correction"*；同族模型存在共享盲区。
-不配置 = 跟随宿主模型（`ANTHROPIC_MODEL` 等）。通道支持任意 Anthropic 兼容端点
-（含本地代理）；非 Anthropic 协议的适配层属路线图。
-
----
-
-## 它解决什么问题
-
-AI 编码助手有三类反复出现的毛病：
-
-```text
-1. 想多做  —— 没让你派子代理，自己派了一堆
-2. 假完成  —— 说"已修复"，但没有任何证据
-3. 危险操作 —— pkill -f、rm -rf 写错路径，一次就翻车
-```
-
-**这些不是模型「不懂」，是模型「做不到自律」。** 提示词层的约束会被绕过，机械门不会。
-
----
-
-## 它**不**解决什么（重要）
-
-> ⚠️ **它证明不了什么，和它能拦什么同样重要。**
-
-| 能力 | 状态 |
-|---|---|
-| 控制 Agent 派生 | ✅ 机械强制 |
-| 拦截已知危险命令 | ✅ 机械强制（防误操作层，不是安全边界） |
-| 要求完成时给证据 | ✅ 能查「有没有证据」（**不判断证据真伪**，见下） |
-| Bash / WebFetch 用量 | ✅ 越过阈值时提示 |
-| 同一命令重复 3 次 | ✅ 提示（**不拦截**） |
-
-**准确说法：主要限制「行动方式」，不保证 AI 的判断一定正确。**
-
-### 刻意不做的（不是欠债，是设计边界）
-
-以下能力**在原理上不适合由机械门实现**，因此本项目不做，也不声称能做：
-
-```text
-根因判断          需要理解语义，门只能匹配字符串与结构
-证据真伪          同上 —— 门能逼你写"在哪看"，查不了那是不是真的
-跨工具强制提升      hook 机制是宿主提供的，本项目只在 Claude Code 上生效
-输出风格           属于产品层，不属于行为约束层
-```
-
-这些不是「待办」，是**明确划出去的边界**。
-把它们写成 ❌ 会让人误以为「将来会做」—— 实际上做了就是过度承诺。
-
-另有一条**不属于边界、属于路线图**（会做，但不在当前版本）：
-供应链签名与来源证明（sigstore keyless 方向：OIDC 身份签名 + 透明日志）——
-当前依赖 GitHub Release 自动提供的 asset digest；完整的签名链值得专门一轮来做。
-
-`判定: MATCH` / `自检通过` / `证据：L3` 都**不等于**内容已被核实。
-
----
-
-## 系统要求
-
-- **Python 3.10+**（安装时自动探测，不写死路径）
-- Claude Code（含 hooks 支持的版本）
-- 平台：Windows / macOS / Linux
-
-**零第三方依赖** —— 全部使用 Python 标准库。
-
----
-
-## 安装
-
-### 预演（不写任何文件）
-
-```bash
-cd <你解压后的目录>
-python install.py
-```
-
-### 应用
-
-```bash
-python install.py --apply              # 安装到当前项目
-python install.py --apply --scope global  # 安装到全局（谨慎）
-```
-
-项目级安装写入 `<项目>/.claude/settings.local.json`，**只影响这一个项目**。
-重启 Claude Code 后生效。
-
-> **定位：可以 Shadow 试跑；不建议直接全局安装。**
-
----
-
-## 最小使用示例
-
-安装后，正常使用即可。门会在后台工作。
-
-**要派子代理时**，在消息里显式声明：
-
-```text
-帮我调研一下 X
-
-agent_spawns: 3
-```
-
-不写这一行，预算门默认按 `0` 执行（禁止派生子代理）。
-
-**要临时放宽时**：
-
-```text
-questions: on     # 允许弹询问（覆盖「不要再问」）
-verify: on        # 允许跑验证（覆盖「不用测」）
-```
-
----
-
-## 验证安装
-
-```bash
-python tools/verify_deploy.py     # 校验部署完整性
-```
-
-跑测试（预期 **494 项**全过 —— 18 套功能测试 494，外加本检查器自身 20 项）：
-
-```bash
-python tests/four_gate_selftest.py        # 57/57
-python tests/cmd_chain_test.py            # 21/21
-python tests/adversarial_test.py          # 25/25
-python tests/budget_safety_test.py        # 44/44
-python tests/intent_gate_test.py          # 43/43
-python tests/upgrade_path_test.py         # 19/19
-python tests/g5_real_regression_test.py   # 42/42  ← 真实会话挖出的用例
-python tests/source_identity_consistency_test.py  # 13/13  ← 集合一致性
-python tests/gate_events_test.py          # 33/33  ← Gate 事件记录
-python tests/g5_windows_path_test.py      # 18/18  ← Windows 路径回归
-python tests/install_cli_test.py          # 19/19  ← 安装参数回归（含 --rollback 拒绝）
-python tests/mcp_field_dispatch_test.py   # 27/27  ← MCP 字段分派
-python tests/g3_attribution_regression_test.py  # 31/31  ← G3 归属误报/漏拦回归
-python tests/semantic_intent_test.py      # 21/21  ← G7 语义意图（离线层）
-python tests/semantic_contract_test.py    # 47/47  ← 输入合同 / 时间预算 / 失败规则（全离线）
-python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（离线层；另 1 项 KNOWN-UNRESOLVED）
-
-> 两个 `semantic_*` 套件的**在线层默认跳过**（`BEHAVIOR_GATE_ONLINE=1` 开启真实调用）。
-> 跳过的项**不计入**上面的数字 —— 「没跑」不写成「通过」。
-> 在线层的真实调用结果单独留档（G7 5/5、G3 4/4，含 real_03）。
-python tests/g7_state_disclosure_test.py  # 16/16  ← 状态故障披露（G7 读失败 / 写失败卡片）
-python tests/gate_stats_cohort_test.py    # 16/16  ← 统计工具 cohort 口径
-python tests/doc_consistency_test.py      # 20/20  ← 文档数字一致性
-```
-
-> **synthetic 与 REAL 分开** —— `tests/` 里前六套是按规则构造的用例（写法理想）；
-> `g5_real_regression_test.py` 里的用例来自**真实会话**并已复现。
-> #48 之所以漏了这么久，正是因为理想写法（`rm -rf /`）与真实写法
-> （`rm -rf /tmp/x`、`rm -r -f /`、`rm -Rf /`）不同。
-
-### 怎么验证「门真的在拦」（不是「代码逻辑对」）
-
-上面 19 套测试验的是**代码逻辑**。它们全绿，**不代表门真的会拦住你**。
-
-要验证门的**实际行为**，用真实部署的 hook 喂真实输入，看退出码：
-
-```bash
-python tools/verify_gates_live.py
-```
-
-它跑五组核验，每组给「动作 → 期望退出码」：
-
-| 组 | 动作 | 期望 |
+| 能力 | 作用 | 边界 |
 |---|---|---|
-| G1 | 无预算行时派 Agent | `exit 2` |
-| G1 | 写 `agent_spawns: 2` 后派 Agent | `exit 0` |
-| G1 | 子代理内再派（带 `agent_id`） | `exit 2` |
-| G3 | 喂「已完成」（无证据块） | `exit 2` |
-| G3 | 喂证据块 + 风险级别 | `exit 0` |
-| G5 | 喂 `rm -rf /` | `exit 2` |
-| G5 | 喂 `find /tmp -name x` | `exit 0` **且有警告输出** |
-| G5 | 喂 `ls -la` | `exit 0` **且完全静默** |
-| G7 | 用户说「不要再问」后触发询问 | `exit 2` [^g7] |
-| 观测 | 跑完后 `gate-events.jsonl` 有新增 | 有 |
+| **子代理预算 · G1** | 检查代理派生授权与预算，限制嵌套派生 | 默认派生预算为 `0`；不限制主模型的判断能力 |
+| **完成声明检查 · G3** | 对完成类声明检查证据结构与风险级别 | 检查格式，不验证证据真伪或业务结果 |
+| **危险模式检查 · G5** | 检查已登记的危险命令模式和部分写入内容规则 | 防误操作，不是完整命令分析器或安全沙箱 |
+| **询问与测试约束 · G7** | 识别并检查“不再询问”“不运行测试”等要求 | 不是通用需求理解，不保证任意自然语言约束都能执行 |
+| **收口与用量观测 · G6** | 采集相关活动、记录用量、生成阈值与重复提醒 | 提醒不等于硬限额，也不等于已避免事故 |
 
-[^g7]: **G7 核验的适用条件**（2026-09-29 补，五维验证 X16）：须在语义评审
-【可用或已关闭】的配置下进行。若配置为启用（默认）但通道**故障**（连不上/
-超时/格式错），该轮标为「未裁决」——按 policy `_failure_rule` 保留既有约束、
-不用词表新增禁令，此时本行实际为 `exit 0`。那不是门失效，是它在故障时
-不擅自限制用户；故障路径与「用户主动关闭」路径的提示文案不同，可区分。
+G1、G5 等执行检查主要使用本地规则。G3、G7 的部分自然语言判断可交给语义评审；两者是不同层次，不能把模型判断当成确定性的安全保证。
 
-> ⚠️ **为什么这一节必须单独存在**：一个门可能「代码逻辑正确」但「实际不生效」——
-> 比如 hook 没注册、被平台跳过、或异常时静默放行。
-> 那正是本项目定义的最严重缺陷：**看起来装了门、其实门是假的**。
->
-> **这一节测的是「装上了没有」，不是「装得对不对」。**
+## 运行要求
 
-> **核验是有时效的。** 门的实际行为随版本、平台、注册配置变化。
-> **改动 hook 或升级 Claude Code 后必须重跑**，不能沿用旧结论。
+- **Python 3.10 或更新版本**。
+- 支持 hooks 的 **Claude Code**。
+- Windows、macOS 或 Linux。
+- **零第三方 Python 依赖**：本地脚本只使用标准库，无需安装额外的 Python 包。
 
-### 怎么知道「门出手得对不对」（看历史）
+默认开启的语义评审另需可用的 Anthropic 兼容模型通道，并可能产生模型调用费用。只使用本地规则时可以关闭它，详见[语义评审与隐私](#语义评审与隐私)。
 
-核验回答「门现在能不能拦」。要知道「门过去拦得对不对」，读事件记录：
+## 快速开始
 
-```bash
-python tools/gate_stats.py
+建议先在一个项目中安装，确认行为符合工作习惯后，再考虑全局使用。
+
+### 1. 下载并解压
+
+从 [GitHub Releases](https://github.com/haotianshuo/behavior-gate/releases/latest) 下载 `behavior-gate-V3.5.17.zip`，解压后进入包含 `install.py` 的目录。
+
+发行包同时提供 `SHA256SUMS.txt`；校验和用于发现下载损坏，不是独立的供应链签名。
+
+### 2. 明确指定目标项目
+
+以下命令在**发行包目录**中执行。将 `D:\your-project` 替换为你实际使用 Claude Code 的项目目录，**不是解压目录**。
+
+```powershell
+python --version
+
+# 预演：显示安装计划，不写入配置
+python install.py --scope project --project "D:\your-project"
+
+# 安装：确认目标正确后执行
+python install.py --scope project --project "D:\your-project" --apply
 ```
 
-`gate-events.jsonl` 一直在记录每次门的决定，但**此前没有任何程序读它** ——
-于是「哪个门从没出手过」「打回之后模型改了吗」这类问题**无法回答**。
-本工具是它的只读消费者，给出四个指标：
+在 macOS / Linux 上，将路径换成自己的项目路径；如果 Python 命令是 `python3`，对应替换 `python` 即可。
 
-| 指标 | 回答什么问题 |
-|---|---|
-| 按门 / 按规则 | 每道门、每条判据各出手多少次 |
-| **重复触发** | 同一会话内同一规则反复命中 → **打回后没改** |
-| **重试仍不合规** | 门打回、模型重试、仍然不合规 —— 摩擦的真实代价 |
-| **死门探测** | 已登记但从未出手的门 → 需区分「不该出手」与「该出手没出手」 |
+项目级安装写入目标项目的 `.claude/hooks/`、`.claude/settings.local.json` 等文件。安装器维护本方案条目并保留第三方 hook；它仍会更新配置，因此应检查计划和备份。
 
-> ⚠️ **它只呈现计数，不做归因。** 出手多可能是真问题，也可能是误报 ——
-> 本工具不区分。**误报率仍然是 `NOT_MEASURED`**，除非有人逐条读记录。
->
-> **记录层不防篡改**（见 [SECURITY.md](SECURITY.md)）：本机有写权限者可以改它。
-> 它用于**发现趋势**，不是不可抵赖的证据。
+**预演只展示安装计划，不替代部署完整性检查。** 若正式安装报告漂移或冲突，先确认原因，不要直接用 `--force` 覆盖。
 
----
+明确需要影响所有项目时，可选择全局安装；执行前先阅读[备份与升级说明](install.md)：
 
-## 门做了什么（观测）
-
-每次门**出手**（deny / stop-feedback），会往状态目录追加一行事件：
-
-```
-<state_dir>/gate-events.jsonl
+```powershell
+python install.py --scope global
+python install.py --scope global --apply
 ```
 
-一行一个事件，形如：
+### 3. 重新启动 Claude Code
 
-```json
-{"ts":"2026-09-15T19:40:00+0800","session":"...","gate_id":"G5",
- "rule_id":"rm_rf_traversal","decision":"deny","tool":"Bash",
- "source_class":"NATURAL","version":"3.5.10","source_snapshot":"..."}
+在目标项目中重新启动 Claude Code，然后正常提出开发需求。全局安装、升级、备份及恢复说明见 [install.md](install.md)。
+
+### 4. 使用你需要的约束
+
+默认不允许派生子代理。需要时，在本次请求中明确给出预算：
+
+```text
+请分析这两个模块的依赖关系，可以使用最多两个子代理。
+agent_spawns: 2
 ```
 
-**只记「门出手了」，不记放行。** 有了它，就能回答
-「这周哪道门拦了多少次、哪条规则、哪份源码快照」——
-而不必再反向翻几万条聊天记录。
+限制询问或测试时，可以直接表达：
 
-**它不记什么**（有意为之）：完整 prompt、assistant 输出、
-完整命令、Write/Edit 正文、MCP payload、任何密钥。
-
-> ⚠️ **边界**：这是 **T1 本地观测证据**。
-> 它证明「本机门代码记录了自己做出的决定」；
-> **不**证明日志不可修改、不可伪造、不可删除，**也不构成不可抵赖的证据**。
-> 有写权限的人可以改它。它不是安全审计系统 —— 需要那种能力请用操作系统级沙箱。
-
-**记录失败绝不改变门的判定**：写不进日志时，门照常执行原来的 deny / allow。
-观测层永远不会成为门的故障点 —— 也**不会让门等待**：
-记录用 0.05 秒的非阻塞锁，拿不到就直接丢这条事件。
-（实测：修前锁被占时一次 deny 要等 3.09 秒；修后 0.14 秒）
-
-> ⚠️ **想让数据活得久，请设 `CLAUDE_BUDGET_STATE_DIR`。**
-> 默认位置在系统临时目录（`%TEMP%` / `/tmp`）——
-> 那是**会被系统清理**的地方，而观测数据的价值恰恰在「攒」。
-> 想长期统计就指到非临时路径：
-
-```bash
-set CLAUDE_BUDGET_STATE_DIR=D:\claude-gate-data      # Windows
-export CLAUDE_BUDGET_STATE_DIR=~/.claude-gate-data   # macOS / Linux
+```text
+只修改这段文案，不要运行测试，也不要再向我提问。
 ```
 
----
+G7 当前主要处理询问与验证活动。不要由此推断“保持布局”“不要改变业务合同”等所有需求也会受到强制保护。
+
+若要重新允许相应活动，可以明确覆盖：
+
+```text
+questions: on
+verify: on
+```
+
+## 完成声明如何检查
+
+当助手宣称工作已完成、已修复或已验证时，G3 会检查是否提供相应的证据结构。格式整理应由助手完成，用户不需要手工编写一套报告。
+
+```text
+证据：L2 动态
+风险级别：中
+
+- 用户下次会看到什么不同：说明本次实际变化
+- 在哪看：文件、页面或输出的位置
+- 我怎么确认它生效了：执行的方法与观察到的结果
+- 未验证项：仍未覆盖的条件；没有时明确说明
+```
+
+证据级别用于区分静态检查、动态验证与端到端验收。**填写了级别标签，不会自动提高证据可信度。** G3 不能检查截图是否真实、测试是否确实执行，也不能替你验收业务结果。
 
 ## 配置
 
-策略内核在 `policy/behavior-policy.json`，适配器读取它，**不硬编码规则**。
+安装后的策略文件位于对应作用域的 `.claude/behavior-policy.json`。要调整当前项目的行为，应修改**正在被该项目 hooks 使用的文件**，而不是只修改下载包里的默认副本。
+
+查找顺序为：
+
+1. `CLAUDE_BEHAVIOR_POLICY` 指定的文件。
+2. hooks 所在作用域的 `.claude/behavior-policy.json`。
+3. 用户目录的 `.claude/behavior-policy.json`。
+4. 未找到可用文件时使用内置默认值。
+
+以下是配置字段示例，**不是要求整份替换现有文件**：
 
 ```json
 {
   "budget": {
     "agent_spawns": 0,
-    "agent_depth": 1
+    "agent_depth": 1,
+    "bash_warn_at": 300,
+    "webfetch_warn_at": 50
   },
-  "effect_gate":    { "enabled": true },
+  "effect_gate": { "enabled": true },
   "destructive_gate": { "enabled": true },
-  "closeout":       { "enabled": true }
+  "closeout": { "enabled": true },
+  "protocol_card": { "enabled": true },
+  "semantic_review": { "enabled": true }
 }
 ```
 
----
+| 配置 | 含义 |
+|---|---|
+| `budget.agent_spawns` | 代理派生预算；请求中的明确授权也会参与判断 |
+| `budget.agent_depth` | 子代理嵌套深度限制 |
+| `budget.bash_warn_at` / `webfetch_warn_at` | 用量提醒阈值，不是工具调用硬限额 |
+| `effect_gate.enabled` | 开关完成声明检查 |
+| `destructive_gate.enabled` | 开关危险模式检查 |
+| `closeout.enabled` | 开关收口与相关用量观测 |
+| `protocol_card.enabled` | 开关任务理解与验证协议的上下文注入；它不是强制门 |
+| `semantic_review.enabled` | 开关语义评审 |
 
-## 适用范围
+G5 支持自定义命令和内容规则。**当前非空自定义规则数组会替换相应内置规则，而不是自动追加。** 修改前请阅读默认策略中的字段说明，并验证原有保护是否仍然存在。
 
-**它防谁：**
+## 语义评审与隐私
 
-```text
-T1  误操作 / 本地损坏 / 配置漂移     → 本项目的保护目标
+语义评审用于减少词表对自然语言的误读，例如区分“分别测试”和“别测试”，以及判断完成类文字是在声明结果还是引用别人的话。
+
+### 开启时会发生什么
+
+- G7 可提交本轮相关用户文本；G3 可提交待判断的助手声明、收尾文字及相关上下文片段。
+- 请求使用环境配置中的模型通道，例如 `ANTHROPIC_BASE_URL`，并使用对应认证；插件不替你创建账户或修改凭据。
+- 评审是独立、只读的文本调用，没有工具执行权限。
+- 调用可能增加等待时间和费用；次数与耗时取决于事件、文本、配置和模型服务，不能视为每轮固定开销。
+
+不自动附带完整项目文件或完整会话历史，**但待评审文本里如果含有敏感内容，该片段仍可能发送给配置的模型端点**。使用前应确认该端点适合处理你的数据。
+
+### 只使用本地规则
+
+在正在生效的策略文件中设置：
+
+```json
+{
+  "semantic_review": {
+    "enabled": false
+  }
+}
 ```
 
-**它不防谁（重要）：**
+关闭后，相关理解路径回到本地词表，不再产生语义评审请求；本地 hooks 本身仍有执行成本。
 
-```text
-T2  有写权限的恶意操作者
-    → 本工具挡不住。哈希与清单只用于【自己发现改动】，
-      有写权限的人可以同时改文件和清单，本包发现不了。
-      这不是缺陷，是它本来就不是安全产品。
+如需单独指定评审模型，可设置 `semantic_review.model`，模型必须由当前端点支持。未设置时，程序会尝试从宿主环境解析模型。
 
-T3  多方审计 / 第三方不可抵赖
-    → 不在设计范围内。本地哈希不构成不可抵赖的证据。
+### 调用失败时
+
+超时、通道不可用或响应不合规时，不伪造评审结论。G7 按既有故障策略保留**能够读取的既有约束**，不据此新增禁令；状态读取或保存失败仍可能影响约束的延续。
+
+插件生成的 stdout 上下文、stderr 告警与用户界面显示不是同一件事。**故障文本已生成，不等于用户已在界面上看见它。** 显示效果需要结合具体 Claude Code 版本验收。
+
+## 检查安装与运行状态
+
+在发行包目录中，针对你刚才安装的**同一个项目**执行：
+
+```powershell
+python tools/verify_deploy.py --source "adapters/claude-code/hooks" --installed "D:\your-project\.claude\hooks" --require-complete
 ```
 
-> ⚠️ **如果你需要防 T2 / T3，这个工具不适用 —— 请改用操作系统级沙箱或外部审计系统。**
-> 不要把本包的校验结果当作安全边界。
+如果是全局安装，Windows PowerShell 对应为：
 
-**其他已知边界：**
-
-- **G5 只拦 Bash 命令字符串**，拦不住等价的 Python / Node 实现
-  （实测：写 `os.remove` / `shutil.rmtree` 的 .py 脚本可以完全绕过）
-- **G3 只检查证据格式，不检查证据真伪**
-  （实测：写 `L3 端到端` 但不真的验证，可以过）
-- **G3 实测误报率约 1/3**（「A 已验证 + B 未验证」分属不同段落时会被误判）
-- **用量与重复提示只提示不拦截** —— 打印一行，不影响执行
-- **失败策略是 FAIL-OPEN** —— 宁可漏拦，不可把用户会话卡死
-
----
-
-## 回滚
-
-⚠️ **`--rollback` 不受支持。** 本安装器没有自动回滚能力 ——
-传入该参数会被直接拒绝（非零退出），不会进入安装或预演路径。
-
-**人工恢复方式（⚠️ 未经自动化测试验证，仅供参照）：**
-
-- 安装时会在配置目录留 `.bak-<时间戳>` 备份，可手工比对恢复；
-- `DEPLOY_MANIFEST.json` 记录了部署文件与哈希，可用于核对外来改动。
-
-需要回滚时请手工操作；自动回滚不在本包的能力范围内。
-
----
-
-## 文件结构
-
-```
-├─ install.py                      安装（双作用域，幂等）
-├─ install.md                      安装说明
-├─ CHANGELOG.md                    变更记录（136 项真实问题）
-├─ BASELINE.md                     已验证基线（冻结状态）
-├─ policy/behavior-policy.json     策略内核（工具无关）
-├─ adapters/claude-code/
-│   ├─ SOURCE_IDENTITY.json        源快照身份声明（元数据层，不进 hooks/）
-│   ├─ settings.fragment.json      hook 配置片段
-│   └─ hooks/                      _lib + 5 个门 + VERSION
-├─ lib/                            共用模块
-├─ tools/                          部署校验 / 源身份 / 可移植性校验
-└─ tests/                          十九套测试（494 项，含真实回归）
+```powershell
+python tools/verify_deploy.py --source "adapters/claude-code/hooks" --installed "$env:USERPROFILE\.claude\hooks" --require-complete
 ```
 
----
+`MATCH` 表示源码身份、受管理部署文件、清单及相关配置检查一致。它**不证明门一定在宿主中触发，不证明告警界面可见，也不证明拦截判断正确**。
 
-## 安全与联系
+本地代码测试、部署一致性、真实宿主触发和实际使用效果是不同的检查，不能互相替代。
 
-**请勿在公开 Issue 中披露疑似漏洞。** 使用
-[GitHub 私下漏洞报告](https://github.com/haotianshuo/behavior-gate/security/advisories/new)
-或发邮件至 `xrlcom@126.com`，主题注明 `Security report — behavior-gate`。
+## 事件记录与复查
 
-请勿在报告中包含密码、API key、Cookie、存储状态、私有 URL 或个人数据。
-普通问题请开 GitHub Issue。
+事件文件位于状态目录中的 `gate-events.jsonl`。默认状态目录是系统临时目录下的 `claude-behavior-gates`；需要长期保留时，可设置 `CLAUDE_BUDGET_STATE_DIR` 指向持久化位置。
 
-> 该邮箱是**公开的项目联系地址，不是版权人声明**。
-> 许可边界见 [LICENSE](LICENSE)。
+记录用于观察门的决定与评审状态，不是完整操作流水，也不是防篡改审计系统。未记录某个操作不代表该操作已经过检查。
 
----
+发行包提供两个只读分析工具：
 
-## 贡献
+```powershell
+# 查看事件统计及分组
+python tools/gate_stats.py --cohort
 
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+# 导出样本，人工标注后再评分
+python tools/guardrail_triage.py sample
+python tools/guardrail_triage.py score
+```
 
-漏洞报告见 [SECURITY.md](SECURITY.md)。
+复查时应固定**源码快照、流量用途和时间窗**。用途需要外部依据，不能把默认 `NATURAL` 标签直接当成真实业务；拦截数量也不能换算成“避免事故数量”。
 
----
+只检查被拦样本，不能据此估计全部漏拦，也不能证明净效率收益。
+
+## 安全与能力边界
+
+- **不是安全边界。** G5 只覆盖已登记的写法与输入范围；等价 Python、Node 或其他执行路径可能不受同样检查。
+- **不是质量验收器。** G3 检查证据格式，不验证测试结果、数据真实性或最终正确性。
+- **不是通用需求执行器。** G7 当前重点是询问与测试，不承诺理解和强制执行全部业务要求。
+- **不是无故障的强制系统。** 存在 FAIL-OPEN 路径；评审、状态或宿主故障可能使部分保护失效。
+- **不防有写权限的恶意操作者。** 本地文件、日志与清单可被共同修改，哈希不提供第三方不可抵赖性。
+- **当前针对 Claude Code。** 不宣称已在 Codex、Cursor 或其他助手中提供同等宿主级控制。
+- **效率收益尚未得到真实业务验证。** 测试通过、拦截发生和开发效率提升是不同结论。
+
+权限管理、沙箱、代码审查、浏览器验收与业务验证仍应由相应工具和流程承担。
+
+## 开发与测试
+
+在仓库或发行包目录中执行：
+
+```powershell
+python tools/source_identity.py
+python tools/preflight_release.py
+```
+
+源码身份工具默认只读。preflight 运行本机检查与测试，不替代跨平台 CI 或真实宿主验收。在线模型测试默认不启用，不能把未执行的在线测试算作通过。
+
+<details>
+<summary>维护者：测试套件与计数</summary>
+
+当前十九套测试中，18 套功能测试合计 **494 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
+
+| 测试 | 用例数 |
+|---|---:|
+| `tests/four_gate_selftest.py` | 57 |
+| `tests/cmd_chain_test.py` | 21 |
+| `tests/adversarial_test.py` | 25 |
+| `tests/budget_safety_test.py` | 44 |
+| `tests/intent_gate_test.py` | 43 |
+| `tests/upgrade_path_test.py` | 19 |
+| `tests/g5_real_regression_test.py` | 42 |
+| `tests/source_identity_consistency_test.py` | 13 |
+| `tests/gate_events_test.py` | 33 |
+| `tests/g5_windows_path_test.py` | 18 |
+| `tests/install_cli_test.py` | 19 |
+| `tests/mcp_field_dispatch_test.py` | 27 |
+| `tests/g3_attribution_regression_test.py` | 31 |
+| `tests/semantic_intent_test.py` | 21 |
+| `tests/semantic_contract_test.py` | 47 |
+| `tests/semantic_g3_test.py` | 2 |
+| `tests/g7_state_disclosure_test.py` | 16 |
+| `tests/gate_stats_cohort_test.py` | 16 |
+| `tests/doc_consistency_test.py` | 20，另计 |
+
+构造用例、真实会话回归和在线层的证据性质不同。[CHANGELOG.md](CHANGELOG.md) 保留 136 项真实问题及修复记录；贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+</details>
+
+## 文档导航
+
+| 文档 | 用途 |
+|---|---|
+| [安装与升级](install.md) | 作用域、配置保留、校验、备份及人工恢复 |
+| [新电脑安装说明](安装说明.md) | 在另一台电脑下载发行包后开始使用 |
+| [v3.5.17 发行说明](docs/releases/v3.5.17.md) | 本版变化、升级提醒与已知限制 |
+| [完整变更记录](CHANGELOG.md) | 历史问题、修复和未解决项 |
+| [贡献指南](CONTRIBUTING.md) | 开发规则、回归测试与提交流程 |
+| [安全说明](SECURITY.md) | 威胁模型与私下报告渠道 |
+
+## 反馈与贡献
+
+欢迎提交可复现的问题、规则误拦案例和文档改进。报告问题时请附上插件版本、系统、Python / Claude Code 版本及最小复现，并移除私有路径、密钥和业务数据。
+
+普通问题请使用 [GitHub Issues](https://github.com/haotianshuo/behavior-gate/issues)。疑似安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开发布敏感细节。
 
 ## 许可证
 

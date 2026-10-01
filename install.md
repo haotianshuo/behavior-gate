@@ -1,240 +1,221 @@
-# 行为门安装说明
+# 安装与升级
 
 > 对应版本：**V3.5.17** ｜ 2026-10-01
->
-> ⚠️ **它证明不了什么，和它能拦什么同样重要 —— 见下面的「已知边界」。**
-> 一句话：门管的是「行动方式」和「格式」，不是「判断对不对」。
-> `判定: MATCH` / `自检通过` / `证据：L3` 都**不等于**内容已被核实。
-> 当前实测：四关 54/54、安装链路 21/21、对抗 25/25、预算安全 38/38、
-> 　　　　　意图门 43/43、升级路径 19/19、G5 真实回归 42/42、
-> 　　　　　源身份一致性 13/13、Gate 事件 33/33、Windows 路径 18/18、
-> 　　　　　安装参数 19/19、MCP 字段分派 27/27、G3 归属回归 31/31、
-> 　　　　　语义意图 21/21、G3 语义归属 2/2、
-> 　　　　　语义合同 47/47（=494 项）
-> 定位：**可以 Shadow 试跑；不建议直接全局安装**
->
-> 版本声明以 `adapters/claude-code/hooks/VERSION` 为准，它随 hooks 一起部署与校验；
-> 本文档的版本行与它不一致时，以 VERSION 为准。
 
----
+本文说明如何选择安装范围、保留已有配置、校验部署，以及在需要时人工恢复。项目能力与配置入口见 [README](README.md)，本版变化见 [发行说明](docs/releases/v3.5.17.md)。
 
-## 一分钟安装（推荐：项目级）
+## 环境要求
 
-```bash
-cd <你解压后的目录>
+- 已安装 Claude Code，并允许相应作用域加载 hooks。
+- Python **3.10 或更高**；CI 覆盖 Python 3.10、3.12。
+- Windows、macOS 或 Linux。
+- 机械检查只依赖 Python 标准库，不需要安装第三方 Python 包。
+- 默认开启的语义评审需要可用的模型调用配置；它不是完全离线的功能。关闭方式见 README。
 
-python install.py                 # 预演，不写任何文件
-python install.py --apply         # 安装到当前项目
+先确认解释器可用：
+
+```powershell
+python --version
 ```
 
-项目级写入 `<项目>/.claude/settings.local.json`，**只影响这一个项目**，
-不会碰你的全局配置，也不会碰其他项目。
+下载 [最新发行包](https://github.com/haotianshuo/behavior-gate/releases/latest)，核对校验和，解压到独立目录。在该目录运行后续安装命令。**发行包目录不是你要开发的目标项目**；请显式指定目标。
 
-重启 Claude Code 后生效。
+## 选择安装范围
 
----
+| 范围 | 配置位置 | 适合的情况 |
+| --- | --- | --- |
+| 项目级，推荐首次使用 | `<目标项目>/.claude/settings.local.json` | 先在一个项目内了解行为与配置 |
+| 全局 | `<用户目录>/.claude/settings.json` | 希望所有 Claude Code 项目使用相同约束 |
 
-## 作用域
+项目级安装不等于完全隔离：Claude Code 仍可能加载全局 hooks、企业策略或其他项目配置。请检查实际加载情况，不要仅凭安装目录判断执行链路。
 
-| | 项目级（默认） | 全局 |
-|---|---|---|
-| 影响范围 | 当前项目 | 所有项目 |
-| 写入位置 | `<项目>/.claude/settings.local.json` | `~/.claude/settings.json` |
-| 回滚 | 删一个文件 | 从备份恢复 |
-| 何时用 | **Shadow 试跑（现在）** | 六项真实测试跑完之后 |
+### 项目级安装
 
-```bash
-python install.py --scope global           # 预演
-python install.py --scope global --apply   # 安装
+在发行包目录运行，将示例路径替换为你已有的项目：
+
+```powershell
+python install.py --scope project --project "D:\your-project"
+python install.py --scope project --project "D:\your-project" --apply
 ```
 
-> `install.py` 是**幂等**的：只新增 hook 条目，不删除、不覆盖任何已有条目。
-> 先备份，再写入，并打印回滚命令。
+macOS / Linux 可使用相同参数，将路径换为 `/path/to/your-project`。省略 `--project` 时，默认目标是当前工作目录；因此，不建议直接在发行包目录运行不带目标的安装命令。
 
----
+### 全局安装
+
+```powershell
+python install.py --scope global
+python install.py --scope global --apply
+```
+
+不带 `--apply` 的命令是预演，不写安装文件。预演展示计划，不代表所有部署完整性检查或宿主验证都已经通过。
+
+## 安装会修改什么
+
+安装器将部署受管理 hooks、版本文件、源码身份对应的部署清单，并将本方案条目合并到目标 settings 中。
+
+重要行为：
+
+- 现有 settings 会备份；第三方 hook 条目应保留。
+- 已有 `behavior-policy.json` 默认保留，不因仓库默认策略更新而被覆盖。
+- 安装器会清理它识别出的旧自有 hook 条目、废弃自有文件及超出保留数量的自有备份。**它不是“只新增、从不删除”的复制器。**
+- `--force` 可能覆盖配置或绕过正常漂移处理；不要为了消除警告直接添加该参数。
+- 升级遇到未知漂移、身份不一致或第三方冲突时，应停下核对，而不是继续覆盖。
+
+安装或升级前，建议另存一份独立备份，至少包含目标作用域的：
+
+```text
+settings.json 或 settings.local.json
+hooks/
+behavior-policy.json
+DEPLOY_MANIFEST.json
+```
+
+备份放在安装目录之外，并保留文件清单或校验和。不要只依赖安装器保留的少量历史备份。
 
 ## 安装后验证
 
-```bash
-python tests/four_gate_selftest.py        # 期望 57/57
-python tests/cmd_chain_test.py            # 期望 21/21
-python tests/adversarial_test.py          # 期望 25/25
-python tests/budget_safety_test.py        # 期望 44/44
-python tests/intent_gate_test.py          # 期望 43/43
-python tests/upgrade_path_test.py         # 期望 19/19
-python tests/g5_real_regression_test.py   # 期望 42/42  ← 真实会话用例
-python tests/source_identity_consistency_test.py  # 期望 13/13
-python tests/gate_events_test.py          # 期望 33/33
-python tests/g5_windows_path_test.py      # 期望 18/18
-python tests/install_cli_test.py          # 期望 19/19
-python tests/mcp_field_dispatch_test.py   # 期望 27/27
-python tests/g3_attribution_regression_test.py  # 期望 31/31
-python tests/semantic_intent_test.py      # 期望 21/21（在线层默认跳过；开启后 +5）
-python tests/semantic_contract_test.py    # 期望 47/47（本地假模型，全离线）
-python tests/semantic_g3_test.py          # 期望 2/2（在线层默认跳过；另 1 项 KNOWN-UNRESOLVED）
-python tests/g7_state_disclosure_test.py  # 期望 16/16
-python tests/gate_stats_cohort_test.py    # 期望 16/16
-python tests/doc_consistency_test.py      # 期望 20/20
+### 1. 检查安装输出
+
+确认命令正常结束，并阅读安装器的文件校验与自检结果。安装器自检是脚本级检查，不能替代 Claude Code 的实际调用。
+
+### 2. 比对部署文件
+
+在发行包目录运行：
+
+```powershell
+python tools/verify_deploy.py --source "adapters/claude-code/hooks" --installed "D:\your-project\.claude\hooks" --require-complete
 ```
 
-**合计 494 项**（18 套功能测试；`doc_consistency_test` 是检查器，不计入）。
-也可以一次跑完：
+Windows PowerShell 下验证全局安装：
 
-```bash
-python tools/verify_portable.py       # 可移植性校验
+```powershell
+python tools/verify_deploy.py --source "adapters/claude-code/hooks" --installed "$env:USERPROFILE\.claude\hooks" --require-complete
 ```
 
-**这些只证明「包装器链路」通过，不等于 Claude Code 集成已验证。**
-真正要在新会话里手测的六项见 §日常使用。
+macOS / Linux 下验证全局安装：
 
-### 三句话快速自测
-
-```
-帮我调研一下这个项目                      → 应被 G1 拦下并解释
-帮我调研一下这个项目，agent_spawns: 2     → 应放行 2 个，第 3 个才拦
-已经修复完成了                            → 应被 G3 打回要求补证据
+```sh
+python tools/verify_deploy.py --source "adapters/claude-code/hooks" --installed "$HOME/.claude/hooks" --require-complete
 ```
 
-第 3 条最关键 —— 如果它没被打回，说明 Stop hook 的 schema 在本机不生效，G3 完全失效。
+`MATCH` 表示这组文件符合比对要求，**不是**“所有约束正确、所有告警可见”的证明。若检查失败，保留输出，并按具体缺失或漂移核对。
 
----
+### 3. 确认真实宿主调用
 
-## 回滚
+重新启动 Claude Code，在目标项目中新建一个会话。用你本来就需要执行的小任务观察约束，并核对会话、时间与事件是否对应。
 
-```bash
-# 项目级
-cp "<项目>/.claude/settings.local.json.bak-<时间戳>" "<项目>/.claude/settings.local.json"
+- 验证子代理预算时，必须实际触发 `Agent` 工具调用；仅发送“调研项目”不能保证助手会派子代理。
+- 验证 G3 时，对象是助手自己的完成声明，不是用户在消息里说“已经完成”。
+- 不要为了验证危险门，在真实项目执行破坏性命令。
+- 告警进入 stdout、stderr 或模型上下文，不等于用户在普通界面能看到；界面效果要单独观察。
 
-# 或者干脆整个删掉
-rm -rf "<项目>/.claude/settings.local.json"
-```
+默认事件文件位于系统临时目录下的 `claude-behavior-gates/gate-events.jsonl`。它记录门的决策信息，不是完整任务审计。需要长期评估时，请按配置选择稳定存储位置。
 
----
+## 配置与日常使用
 
-## 日常使用
+策略读取顺序及完整说明见 [README 的配置部分](README.md#配置)。安装后修改配置时，确认你编辑的是**实际被加载**的那份策略。
 
-**大多数时候它应该是隐形的。** 你只会在三种情况下看到它：
-
-1. AI 想派后台 Agent（默认禁止）
-2. AI 想执行已知危险操作（`pkill -f` / `find /tmp` / 整行 `rm -rf /` 等）
-3. AI 想宣布完成但没给证据
-
-**要放行子代理**，在 prompt 里写一行就行，不用改文件：
-
-```
-帮我调研这个项目，agent_spawns: 3
-```
-
-口语也认：`可以派 Agent` → 放行 3 个；`不要开后台` → 强制 0 个。
-
----
-
-## 已知边界（不要当成自动驾驶）
-
-| 能力 | 状态 |
-|---|---|
-| 控制 Agent 派生 | ✅ 机械强制 |
-| 拦截已知危险命令 | ✅ 机械强制（防误操作层，不是安全边界） |
-| 要求完成时给证据 | ✅ 后置打回，能查"有没有证据"（**不判断真伪**） |
-| Bash / WebFetch 用量 | ✅ 越过阈值时提示 |
-| 同一命令重复 3 次 | ✅ 提示（不拦截） |
-
-**准确说法：主要限制「行动方式」，不保证 AI 的判断一定正确。**
-
-### 刻意不做的（边界，不是欠债）
-
-以下能力**原理上不适合由机械门实现**，本项目不做，也不声称能做：
+常见任务约束可以直接写在消息中：
 
 ```text
-根因判断        需要理解语义 —— 门只能匹配字符串与结构
-证据真伪        门能逼你写"在哪看"，查不了那是不是真的
-跨工具强制提升    hook 机制由宿主提供，本项目只在 Claude Code 上生效
-输出风格        属于产品层，不属于行为约束层
+agent_spawns: 2
+这次不要测试，也不要再提问。
 ```
 
-它们不是「待办」。写成待办会让人以为将来会做 —— 做了就是过度承诺。
-
-### Threat Model —— 它防谁、不防谁
+需要重新允许时，明确表达新授权；项目也支持：
 
 ```text
-T1  误操作 / 本地损坏 / 漂移          → 本项目保护目标
-T2  有写权限的故意破坏者               → 不防。它不是安全产品
-T3  多方审计 / 第三方不可抵赖          → 不防。本地哈希不构成不可抵赖证据
+questions: on
+verify: on
 ```
 
-本包的 sha256 与清单**只用于 T1 本地比对**，不构成
-malicious-writer-proof、不可抵赖、密码学不可篡改 ——
-有写权限的人可以同时改文件和清单，本包**发现不了**。
+这些参数约束助手的行动，不取代工具权限、沙箱、代码审查或业务验收。不要把允许某个动作当成授权助手修改任意文件或部署系统。
 
-> ⚠️ **需要防 T2 / T3 的场合，本工具不适用** —— 请改用操作系统级沙箱
-> 或外部审计系统。不要把本包的结果当作安全边界。
+## 升级已有安装
 
-### MCP 通道的字段分派取舍（#53）
+1. 下载新包到独立目录，不覆盖正在使用的源码目录。
+2. 保存上述独立备份，包含 hooks **和部署清单**。
+3. 显式选择原安装作用域与目标，先运行预演。
+4. 执行正常 `--apply`；若出现漂移或冲突，停下保留证据。
+5. 运行文件一致性检查，再新建 Claude Code 会话验证实际调用。
 
-MCP 工具的输入要按字段语义分派规则：**命令类字段 → cmd 规则，
-内容类字段 → content 规则**。但**字段名判不出字段语义**，所以必须选一边。
+已有策略默认不覆盖。新版本的默认值或新配置项需要你逐项比较，不应为了让策略中的版本文字一致而直接替换整份用户配置。
 
-当前取舍（按本包 FAIL-OPEN 原则）：
+## 人工恢复与停用
 
-```text
-已知命令字段（command / cmd / script / shell / exec / argv / args / code / stdin）
-    —— 只收【有明确命令语义】的名字，不含 data / input / payload
-       这类通用容器名（它们语义不明，与"名单外字段"同类）
-    → 只过 cmd 规则
-其他所有字段（含名单外的）
-    → 只过 content 规则
+**v3.5.17 没有自动回滚或卸载命令。** `install.py --rollback` 会明确拒绝执行；不要把它当成恢复入口。
+
+恢复时：
+
+1. 结束受影响的 Claude Code 会话。
+2. 从同一次安装前备份恢复受管理 hooks、对应 `DEPLOY_MANIFEST.json`，以及需要恢复的策略。
+3. 恢复 settings 前，比较安装后的其他变化；如果后来增加了第三方 hooks，应做定向合并，而不是覆盖掉它们。
+4. 重新启动，检查恢复后的文件身份和实际 hook 调用。
+
+只恢复旧 hooks 而保留新 manifest，会产生错误的源码身份标签。只恢复 settings 也不等于完整恢复。
+
+需要停用时，可定向移除本方案注册的 hook 条目。**不要删除整份 settings、整个 `.claude` 目录或第三方 hooks。** 如果无法判断归属，先保留配置并反馈，不要批量清理。
+
+## 排查顺序
+
+| 现象 | 先检查什么 |
+| --- | --- |
+| 安装命令无法启动 | Python 版本、路径与当前目录 |
+| 文件校验不一致 | 安装目标、缺失文件、是否手工改过 hooks、源身份 |
+| 配置似乎没有变化 | 策略优先级、是否保留了原用户策略 |
+| 语义评审超时或失败 | 模型配置与通道、请求超时、故障输出 |
+| hooks 没有执行 | 宿主版本、配置加载、项目信任与作用域 |
+| 找不到某条告警 | 输出通道、退出码、普通界面和展开日志分别观察 |
+
+反馈问题时请附版本、系统、最小复现和脱敏输出。不要上传模型密钥、完整私人会话或未经检查的策略与日志。
+
+## 已知边界
+
+BehaviorGate 限制行动方式，不保证判断正确。G3 检查格式而非真伪，G5 是防误操作层而非安全边界。FAIL-OPEN 路径可能使部分约束失效；文件哈希只用于本地一致性检查，不防有写权限的人同时改动文件与清单。
+
+完整能力边界见 [README](README.md#安全与能力边界)。请把包内测试、真实宿主行为、界面可见性和业务收益分开验收。
+
+### MCP 字段分派
+
+MCP 工具输入按字段名选择规则：已知命令字段，如 `command`、`cmd`、`script`、`argv`，进入命令规则；其余字段进入内容规则。字段名不能保证字段的实际执行语义。
+
+如果某个 MCP server 用名单外字段承载可执行命令，该通道可能漏拦。使用文件系统、Shell 或数据库类 server 时，应单独确认其输入字段与执行行为，不能把 G5 的检查当成这些服务的权限控制。
+
+## 开发者检查
+
+发行包包含完整检查工具与测试。需要验证包本身时，串行运行：
+
+```powershell
+python tools/preflight_release.py
 ```
 
-**已知代价**：若某个 MCP server 用**名单外的字段名**承载真正会被执行的命令，
-本规则会漏拦。
+不要同时启动多个全量预检，以免资源竞争干扰耗时敏感测试。源码与包内回归通过，不等于所有真实宿主和业务场景都通过。
 
-**这个代价有多大，取决于你装了什么 server**。实测（本机）：
-`mcp__scheduled-tasks__*` 的全部字段是
-`taskId / prompt / description / cronExpression / fireAt / enabled` ——
-语义是 ID / 文本 / 时间 / 布尔，**没有一个承载 shell 命令**。
+<details>
+<summary>完整测试清单：19 套测试，功能回归 494 项，文档检查另计</summary>
 
-> ⚠️ 这条证据只覆盖**本机当前可达**的工具。它**不证明**
-> "文本字段永远不会被执行" —— 那取决于各 server 的实现，不在本门可观测范围。
->
-> **如果你要装 filesystem / shell / 数据库类 MCP server**，
-> 请确认其命令字段名在上面的名单里；不在的话，G5 对那条通道是失效的。
+| 脚本 | 用例 |
+| --- | ---: |
+| `tests/four_gate_selftest.py` | 57 |
+| `tests/cmd_chain_test.py` | 21 |
+| `tests/adversarial_test.py` | 25 |
+| `tests/budget_safety_test.py` | 44 |
+| `tests/intent_gate_test.py` | 43 |
+| `tests/upgrade_path_test.py` | 19 |
+| `tests/g5_real_regression_test.py` | 42 |
+| `tests/source_identity_consistency_test.py` | 13 |
+| `tests/gate_events_test.py` | 33 |
+| `tests/g5_windows_path_test.py` | 18 |
+| `tests/install_cli_test.py` | 19 |
+| `tests/mcp_field_dispatch_test.py` | 27 |
+| `tests/g3_attribution_regression_test.py` | 31 |
+| `tests/semantic_intent_test.py` | 21 |
+| `tests/semantic_contract_test.py` | 47 |
+| `tests/semantic_g3_test.py` | 2 |
+| `tests/g7_state_disclosure_test.py` | 16 |
+| `tests/gate_stats_cohort_test.py` | 16 |
+| `tests/doc_consistency_test.py` | 20，单独计数 |
 
-### 三条最容易误读的
+在线模型测试默认不启用；以实际输出区分执行、跳过与已知未解决项。
 
-1. `判定: MATCH` = 文件与源一致，**不等于**门工作正常（源本身写错，它一样报 MATCH）。
-2. **G3 放行 ≠ 结论正确** —— 它只确认你写了证据块，**一个空洞的证据块照样能过**。
-   它唯一的好用处是逼出"在哪看、怎么确认"这两栏；那两栏是不是真的，只有人能查。
-3. `自检 4/4 通过` = 那四条命令的退出码符合预期，**不等于**整条链路被验证过。
-
----
-
-## 文件结构
-
-```
-├─ install.py                      安装（双作用域，幂等）
-├─ install.md                      安装说明（本文件）
-├─ CHANGELOG.md                    变更记录
-├─ policy/behavior-policy.json     策略内核（工具无关）
-├─ adapters/claude-code/
-│   ├─ settings.fragment.json      hook 配置片段
-│   └─ hooks/                      _lib + 5 个门 + review_unit（语义评审）+ VERSION
-├─ lib/                            共用模块（部署清单 / Python 探测）
-├─ tools/                          部署校验 / 可移植性校验
-└─ tests/                          十九套测试（=494 项）
-```
-
-### 五道门
-
-| 门 | 触发 | 强制力 |
-|---|---|---|
-| **G1 预算** | `PreToolUse(Agent)` | ✅ exit 2 |
-| G2 范围 | 提示词层 | ⚠️ 不强制 |
-| **G3 生效** | `Stop` | ✅ `{"decision":"block"}` |
-| G4 循环 | 提示词层 + 收口记录 | ⚠️ 不强制 |
-| **G5 危险** | `PreToolUse(Bash/Edit/Write/MCP)` | ✅ exit 2 |
-| **G7 意图** | `PreToolUse(AskUserQuestion/Bash)` | ✅ exit 2 |
-| G6 收口 | 旁路采集 | 只记录 + 用量提示，不阻断 |
-
-> ⚠️ **matcher 用 `Agent`，不是 `Task`。**
-> 本 harness 里派生工具叫 `Agent`；`Task*` 系列是待办清单工具，
-> 写 `Task` 匹配不到任何东西，写 `Task.*` 正则会误伤待办工具。
+</details>
