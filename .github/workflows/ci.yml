@@ -86,6 +86,9 @@ jobs:
       - name: 统计工具 cohort 口径
         run: python tests/gate_stats_cohort_test.py
 
+      - name: 统计工具重复触发口径
+        run: python tests/gate_stats_repeats_test.py
+
       - name: 文档数字一致性
         run: python tests/doc_consistency_test.py
 

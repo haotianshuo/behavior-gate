@@ -327,9 +327,17 @@ CMD_DENY = [
         "id": "rm_rf_windows_env",
         # 3.5.10 修复（#48）：与 rm_rf_traversal 共用选项解析片段。
         # 修前同样漏 `rm -r -f $env:TEMP/x` 与 `rm -Rf $TEMP`。
+        # 2026-10-07（核验发现）：变量名补边界断言 (?![A-Za-z0-9_])。
+        #   修前 `$TMPD`/`$TMP_DIR`/`$HOMED`/`$env:TEMPFOO`（均为【不同变量】）
+        #   被前缀误匹配（实测 rc=2）；修后同族对照 $TMP 本体与
+        #   $TMP 子路径仍拦（含在 g5_windows_path_test 变量边界小节）。
+        #   花括号组 `${..}` 与 `%..%` 组自带闭合边界，不涉及。
         "pattern": r"\brm\s+" + _RM_OPTS +
-                   r"[\"']?(\$env:(TEMP|TMP|USERPROFILE)|\$\{(TEMP|TMP|USERPROFILE|HOME)\}"
-                   r"|\$TEMP|\$TMP|\$USERPROFILE|\$HOME|%TEMP%|%TMP%|%USERPROFILE%)"
+                   r"[\"']?(\$env:(TEMP|TMP|USERPROFILE)(?![A-Za-z0-9_])"
+                   r"|\$\{(TEMP|TMP|USERPROFILE|HOME)\}"
+                   r"|\$TEMP(?![A-Za-z0-9_])|\$TMP(?![A-Za-z0-9_])"
+                   r"|\$USERPROFILE(?![A-Za-z0-9_])|\$HOME(?![A-Za-z0-9_])"
+                   r"|%TEMP%|%TMP%|%USERPROFILE%)"
                    r"([\\/\.\"'”’]*(\s|$|\*))?",
         "why": "递归强删 Windows 环境变量指向的目录（临时目录/用户目录）。\n"
                "  实测 `rm -rf $env:TEMP/x` 与 `rm -rf $TEMP/x` 此前放行。",

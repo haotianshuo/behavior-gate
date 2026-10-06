@@ -83,18 +83,67 @@ def load(path, since=None):
     return out
 
 
+# 与 guardrail_triage.py 的 HIT_DECISIONS 保持同一事实口径：
+# 只有这些 decision 才表示门实际拦截/打回（评审事件另行排除）。
+HIT_DECISIONS = frozenset({
+    "deny",
+    "stop_feedback",
+    "stop_feedback_retry",
+})
+
+
+def _decision_class(decision):
+    """block / review / unknown —— 不对未知类型猜测。"""
+    if isinstance(decision, str):
+        if decision in HIT_DECISIONS:
+            return "block"
+        if decision.startswith("review_"):
+            return "review"
+    return "unknown"
+
+
+def _decision_label(decision):
+    """把任意 decision 归一为稳定、可 JSON 序列化的字符串标签。
+
+    空值与空串统一记 <empty>；非字符串值用紧凑 JSON 表示
+    （ensure_ascii=False + sort_keys 保证同值同标签）。
+    """
+    if isinstance(decision, str):
+        return decision if decision else "<empty>"
+    if decision is None:
+        return "<empty>"
+    try:
+        return json.dumps(decision, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(decision)
+
+
 def analyze(recs):
     a = {
         "total": len(recs),
         "by_gate": collections.Counter(r.get("gate_id") for r in recs),
         "by_rule": collections.Counter(r.get("rule_id") for r in recs),
-        "by_decision": collections.Counter(r.get("decision") for r in recs),
+        "by_decision": collections.Counter(_decision_label(r.get("decision"))
+                                           for r in recs),
         "by_day": collections.Counter((r.get("ts") or "")[:10] for r in recs),
     }
-    # A. 同一 session 内同一规则重复触发
+    # A. 同一 session 内同一规则重复触发 —— 只算门真实出手；
+    #    REVIEW 评审与未知 decision 不进入（见 _decision_class）。
+    unknown = collections.Counter()
     grp = collections.defaultdict(list)
     for r in recs:
+        decision = r.get("decision")
+        cls = _decision_class(decision)
+        if cls == "unknown":
+            unknown[_decision_label(decision)] += 1
+            continue
+        if cls != "block":
+            continue
+        if (r.get("gate_id") or "") == "REVIEW":
+            continue
         grp[(r.get("session"), r.get("rule_id"))].append(r.get("ts") or "")
+    a["unknown_decisions"] = unknown
     a["repeats"] = sorted(
         [(len(v), k[0], k[1]) for k, v in grp.items() if len(v) >= 3],
         reverse=True)
@@ -257,7 +306,11 @@ def main():
     ap.add_argument("--until", default=None, help="截止时间（ISO 前缀比较，配合 --cohort）")
     ap.add_argument("--purpose-map", default=None,
                     help='用途依据 JSON：{"basis": "...", "classes": {"显式测试": ["sid", ...]}}')
+    ap.add_argument("--legacy-metrics", action="store_true",
+                    help="附带旧混合口径 repeats_all_decisions（仅与 --json 同用）")
     args = ap.parse_args()
+    if args.legacy_metrics and not args.json:
+        ap.error("--legacy-metrics requires --json")
 
     path = args.path or events_path()
     recs = load(path, args.since)
@@ -309,12 +362,23 @@ def main():
     a = analyze(recs)
 
     if args.json:
-        print(json.dumps({
+        out = {
             "path": path, "since": args.since, "total": a["total"],
             "by_gate": dict(a["by_gate"]), "by_rule": dict(a["by_rule"]),
             "by_decision": dict(a["by_decision"]), "by_day": dict(a["by_day"]),
             "repeats": a["repeats"][:20], "retry": dict(a["retry"]),
-        }, ensure_ascii=False, indent=2))
+            "unknown_decisions": dict(a.get("unknown_decisions") or {}),
+        }
+        if args.legacy_metrics:
+            # 旧混合口径：不按 gate/decision 过滤，仅显式请求时输出对照
+            legacy = collections.defaultdict(list)
+            for r in recs:
+                legacy[(r.get("session"), r.get("rule_id"))].append(
+                    r.get("ts") or "")
+            out["repeats_all_decisions"] = sorted(
+                [(len(v), k[0], k[1]) for k, v in legacy.items()
+                 if len(v) >= 3], reverse=True)[:20]
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
 
     print("=" * 78)
@@ -324,6 +388,12 @@ def main():
     if args.since:
         print("  范围: >= %s" % args.since)
     print("  记录: %d 条" % a["total"])
+    print("  重复触发口径：仅统计 deny / stop_feedback / stop_feedback_retry；"
+          "REVIEW 评审调用不计入。")
+    unknown = a.get("unknown_decisions") or {}
+    if unknown:
+        print("  ⚠️ 未知 decision 类型（未计入重复触发）：%s" %
+              ", ".join("%s=%d" % (k, v) for k, v in sorted(unknown.items())))
     if not a["total"]:
         print()
         print("  ⚠️ 无记录。可能原因：门从未出手 / 状态目录不对 / 文件被删。")

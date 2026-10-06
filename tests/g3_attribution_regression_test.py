@@ -78,6 +78,19 @@ def run(msg, hook="effect_gate.py"):
     return p.returncode, first
 
 
+def run_full(msg, hook="effect_gate.py"):
+    """同 run()，但返回【完整 stderr】—— 文案断言需要全文。"""
+    inp = json.dumps({"session_id": "g3attr", "last_assistant_message": msg,
+                      "stop_hook_active": False})
+    env = dict(os.environ)
+    env["CLAUDE_BEHAVIOR_POLICY"] = _POLICY_OFF
+    env["CLAUDE_BUDGET_STATE_DIR"] = _STATE_DIR
+    p = subprocess.run([sys.executable, os.path.join(HOOKS, hook)],
+                       input=inp, capture_output=True, text=True,
+                       encoding="utf-8", env=env)
+    return p.returncode, p.stderr
+
+
 def real(name):
     with open(os.path.join(REAL_DIR, name), encoding="utf-8") as f:
         return f.read()
@@ -253,6 +266,23 @@ _LAYOUTS = [
 for name, msg in _LAYOUTS:
     c, e = run(msg)
     check("%s 的同一结果声明 → 拦" % name, c, 2, e)
+
+print()
+print("-" * 64)
+print("C2 · P1-G3 文案：反复被打回时的指引（3.5.17 同版修补）")
+print("-" * 64)
+# 依据：真实数据 21 条 stop_feedback_retry（跨 18 会话 / 20 天）
+# + 15 组同规则重复打回 ——「补证据→再被拒」的循环真实存在。
+# 修法：两个 G3 证据不足分支的拒绝文案各补一行条件式指引，不依赖计数、
+# 不改变判定（仅 _reject 的第一个字符串参数），每处恰好出现一次。
+_c, _err = run_full("已完成。")
+check("无证据块拒文案含「反复被打回」指引（恰好 1 次）",
+      _err.count("若因同一原因反复被打回") == 1 and _c == 2,
+      True, "exit=%d" % _c)
+_c, _err = run_full("已完成。\n\n**证据**：L1 静态\n**风险级别**：高\n")
+check("级别不足拒文案含「反复被打回」指引（恰好 1 次）",
+      _err.count("若因同一原因反复被打回") == 1 and _c == 2,
+      True, "exit=%d" % _c)
 
 print()
 print("-" * 64)

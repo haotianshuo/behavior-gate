@@ -62,6 +62,22 @@ def run(cmd):
     return p.returncode
 
 
+def run_write(content):
+    """Write 通道变体（content 规则）——多行行锚定语义核验用。"""
+    d = tempfile.mkdtemp(prefix="g5wc-")
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8",
+           "CLAUDE_BUDGET_STATE_DIR": d}
+    p = subprocess.run(
+        [sys.executable, G5],
+        input=json.dumps({"session_id": "g5wc",
+                          "hook_event_name": "PreToolUse",
+                          "tool_name": "Write",
+                          "tool_input": {"file_path": "/tmp/w.sh",
+                                         "content": content}}).encode("utf-8"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=30)
+    return p.returncode
+
+
 def main():
     print("=" * 88)
     print("G5 Windows 路径回归（#51）")
@@ -107,6 +123,48 @@ def main():
     ]:
         rc = run(cmd)
         check("%-16s（应拦）" % note, rc == 2, "rc=%d" % rc)
+
+    # ---------- 变量名边界（2026-10-07）----------
+    print("\n----- 变量名边界：$TMPD/$HOMED 是【不同变量】，不得误拦 -----")
+    # 核验发现（2026-10-07）：rm_rf_windows_env 的变量名无边界断言 →
+    # `$TMPD` / `$TMP_DIR` / `$HOMED` / `$env:TEMPFOO`（均为【不同变量】）
+    # 被前缀误匹配（实测 rc=2）。修法：变量名后加 (?![A-Za-z0-9_])，
+    # 与 #51 的尾锚定同族——只收窄误报面，不改真目标拦截。
+    DQ = chr(34)
+    TMPD = "$TMP" + "D"
+    TMP_DIR = "$TMP" + "_DIR"
+    HOMED = "$HOME" + "D"
+    ENVFOO = "$env:TEMP" + "FOO"
+    for cmd, note in [
+        (RM + " " + R + " " + DQ + TMPD + DQ, "自定义变量 $TMPD"),
+        (RM + " " + R + " " + DQ + TMP_DIR + DQ, "自定义变量 $TMP_DIR"),
+        (RM + " " + R + " " + DQ + HOMED + DQ, "自定义变量 $HOMED"),
+        (RM + " " + R + " " + ENVFOO, "$env:TEMPFOO"),
+    ]:
+        rc = run(cmd)
+        check("%-20s（应放行）" % note, rc == 0, "rc=%d" % rc)
+
+    print("\n----- 同族对照：真目标与子路径【仍要拦】（修复不得过宽）-----")
+    for cmd, note in [
+        (RM + " " + R + " " + DQ + "$TMP" + DQ, "$TMP 本体"),
+        (RM + " " + R + " " + DQ + "$TMP" + DQ + "/cache", "$TMP 子路径"),
+        (RM + " " + R + " " + DQ + "$HOME" + DQ, "$HOME 本体"),
+        (RM + " " + R + " " + DQ + "$env:TEMP" + DQ + "/x", "$env:TEMP 子路径"),
+    ]:
+        rc = run(cmd)
+        check("%-20s（应拦）" % note, rc == 2, "rc=%d" % rc)
+
+    # ---------- 多行内容的行锚定语义（2026-10-07 核验）----------
+    print("\n----- 多行内容：脚本第 2 行删根【要拦】、句中提及【放行】-----")
+    # 核验背景：CHANGELOG「没修的」章节曾登记“多行覆盖未修”，核验
+    # v3.5.0/v3.5.10/v3.5.14/v3.5.15/v3.5.16 与当前版实测【均已拦截】
+    # （现象未复现）。补锁定测试：防止未来把行锚定语义改回
+    # “只匹配字符串开头”。
+    SCRIPT2 = "#!/bin/bash\n" + RM + " " + R + " /" + "\n"
+    rc = run_write(SCRIPT2)
+    check("%-24s（应拦）" % "多行脚本第 2 行删根", rc == 2, "rc=%d" % rc)
+    rc = run_write("禁止 " + RM + " " + R + " / 这类命令" + "\n")
+    check("%-24s（应放行）" % "句中文档提及", rc == 0, "rc=%d" % rc)
 
     # ---------- 汇总 ----------
     npass = sum(1 for _, ok, _ in _results if ok)
