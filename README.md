@@ -6,9 +6,9 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#运行要求)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> 当前版本：**V3.5.17** ｜ 2026-10-01
+> 当前版本：**V3.5.18** ｜ 2026-10-07
 
-[下载发行包](https://github.com/haotianshuo/behavior-gate/releases/latest) · [快速开始](#快速开始) · [安装与升级](install.md) · [本版更新](docs/releases/v3.5.17.md) · [参与贡献](CONTRIBUTING.md)
+[下载发行包](https://github.com/haotianshuo/behavior-gate/releases/latest) · [快速开始](#快速开始) · [安装与升级](install.md) · [本版更新](docs/releases/v3.5.18.md) · [参与贡献](CONTRIBUTING.md)
 
 ## 为什么使用 BehaviorGate
 
@@ -55,7 +55,7 @@ G1、G5 等执行检查主要使用本地规则。G3、G7 的部分自然语言�
 
 ### 1. 下载并解压
 
-从 [GitHub Releases](https://github.com/haotianshuo/behavior-gate/releases/latest) 下载 `behavior-gate-V3.5.17.zip`，解压后进入包含 `install.py` 的目录。
+从 [GitHub Releases](https://github.com/haotianshuo/behavior-gate/releases/latest) 下载 `behavior-gate-V3.5.18.zip`，解压后进入包含 `install.py` 的目录。
 
 发行包同时提供 `SHA256SUMS.txt`；校验和用于发现下载损坏，不是独立的供应链签名。
 
@@ -272,7 +272,7 @@ python tools/preflight_release.py
 <details>
 <summary>维护者：测试套件与计数</summary>
 
-当前十九套测试中，18 套功能测试合计 **494 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
+当前二十套测试中，19 套功能测试合计 **517 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
 
 | 测试 | 用例数 |
 |---|---:|
@@ -285,18 +285,19 @@ python tools/preflight_release.py
 | `tests/g5_real_regression_test.py` | 42 |
 | `tests/source_identity_consistency_test.py` | 13 |
 | `tests/gate_events_test.py` | 33 |
-| `tests/g5_windows_path_test.py` | 18 |
+| `tests/g5_windows_path_test.py` | 28 |
 | `tests/install_cli_test.py` | 19 |
 | `tests/mcp_field_dispatch_test.py` | 27 |
-| `tests/g3_attribution_regression_test.py` | 31 |
+| `tests/g3_attribution_regression_test.py` | 33 |
 | `tests/semantic_intent_test.py` | 21 |
 | `tests/semantic_contract_test.py` | 47 |
 | `tests/semantic_g3_test.py` | 2 |
 | `tests/g7_state_disclosure_test.py` | 16 |
 | `tests/gate_stats_cohort_test.py` | 16 |
+| `tests/gate_stats_repeats_test.py` | 11 |
 | `tests/doc_consistency_test.py` | 20，另计 |
 
-构造用例、真实会话回归和在线层的证据性质不同。[CHANGELOG.md](CHANGELOG.md) 保留 136 项真实问题及修复记录；贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+构造用例、真实会话回归和在线层的证据性质不同。[CHANGELOG.md](CHANGELOG.md) 保留 140 项真实问题及修复记录；贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 </details>
 
@@ -306,7 +307,7 @@ python tools/preflight_release.py
 |---|---|
 | [安装与升级](install.md) | 作用域、配置保留、校验、备份及人工恢复 |
 | [新电脑安装说明](安装说明.md) | 在另一台电脑下载发行包后开始使用 |
-| [v3.5.17 发行说明](docs/releases/v3.5.17.md) | 本版变化、升级提醒与已知限制 |
+| [v3.5.18 发行说明](docs/releases/v3.5.18.md) | 本版变化、升级提醒与已知限制 |
 | [完整变更记录](CHANGELOG.md) | 历史问题、修复和未解决项 |
 | [贡献指南](CONTRIBUTING.md) | 开发规则、回归测试与提交流程 |
 | [安全说明](SECURITY.md) | 威胁模型与私下报告渠道 |

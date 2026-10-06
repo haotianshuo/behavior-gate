@@ -1,8 +1,8 @@
 # 安装与升级
 
-> 对应版本：**V3.5.17** ｜ 2026-10-01
+> 对应版本：**V3.5.18** ｜ 2026-10-07
 
-本文说明如何选择安装范围、保留已有配置、校验部署，以及在需要时人工恢复。项目能力与配置入口见 [README](README.md)，本版变化见 [发行说明](docs/releases/v3.5.17.md)。
+本文说明如何选择安装范围、保留已有配置、校验部署，以及在需要时人工恢复。项目能力与配置入口见 [README](README.md)，本版变化见 [发行说明](docs/releases/v3.5.18.md)。
 
 ## 环境要求
 
@@ -143,7 +143,7 @@ verify: on
 
 ## 人工恢复与停用
 
-**v3.5.17 没有自动回滚或卸载命令。** `install.py --rollback` 会明确拒绝执行；不要把它当成恢复入口。
+**v3.5.18 没有自动回滚或卸载命令。** `install.py --rollback` 会明确拒绝执行；不要把它当成恢复入口。
 
 恢复时：
 
@@ -192,7 +192,7 @@ python tools/preflight_release.py
 不要同时启动多个全量预检，以免资源竞争干扰耗时敏感测试。源码与包内回归通过，不等于所有真实宿主和业务场景都通过。
 
 <details>
-<summary>完整测试清单：19 套测试，功能回归 494 项，文档检查另计</summary>
+<summary>完整测试清单：20 套测试，功能回归 517 项，文档检查另计</summary>
 
 | 脚本 | 用例 |
 | --- | ---: |
@@ -205,15 +205,16 @@ python tools/preflight_release.py
 | `tests/g5_real_regression_test.py` | 42 |
 | `tests/source_identity_consistency_test.py` | 13 |
 | `tests/gate_events_test.py` | 33 |
-| `tests/g5_windows_path_test.py` | 18 |
+| `tests/g5_windows_path_test.py` | 28 |
 | `tests/install_cli_test.py` | 19 |
 | `tests/mcp_field_dispatch_test.py` | 27 |
-| `tests/g3_attribution_regression_test.py` | 31 |
+| `tests/g3_attribution_regression_test.py` | 33 |
 | `tests/semantic_intent_test.py` | 21 |
 | `tests/semantic_contract_test.py` | 47 |
 | `tests/semantic_g3_test.py` | 2 |
 | `tests/g7_state_disclosure_test.py` | 16 |
 | `tests/gate_stats_cohort_test.py` | 16 |
+| `tests/gate_stats_repeats_test.py` | 11 |
 | `tests/doc_consistency_test.py` | 20，单独计数 |
 
 在线模型测试默认不启用；以实际输出区分执行、跳过与已知未解决项。
