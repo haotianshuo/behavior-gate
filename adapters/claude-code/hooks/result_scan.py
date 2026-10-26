@@ -52,6 +52,65 @@ _SIGNAL_RX = re.compile(
 # 只用于标记，不用于拦截。
 _WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
+# Bash 里【明确的】写入形态。只认重定向、tee、sed -i、truncate，
+# 不把任何 Bash 命令都当写入 —— 大部分命令是读或执行。
+_BASH_REDIR_RX = re.compile(r"(?:^|[^<>&|])(?:>>?)\s*([^\s;&|<>]+)")
+_BASH_TEE_RX = re.compile(r"\btee\s+(?:-a\s+)?([^\s;&|]+)")
+_BASH_SED_I_RX = re.compile(r"\bsed\s+-i")
+_BASH_TRUNC_RX = re.compile(r"\btruncate\s+-s\s+\S+\s+([^\s;&|]+)")
+
+# 这些目标不构成"修改了工作区对象"
+_IGNORE_TARGETS = frozenset({
+    "/dev/null", "/dev/stdout", "/dev/stderr", "nul", "nul:",
+})
+
+
+def _short_target(p):
+    """把写目标压成可比的短串（最多两段，80 字）。
+
+    只用于「结果之后有没有改到同一对象」的粗比对，不落完整路径。
+    """
+    p = (p or "").strip("'\"")
+    if not p or p.lower() in _IGNORE_TARGETS:
+        return None
+    parts = [x for x in re.split(r"[\\/]+", p) if x]
+    if not parts:
+        return None
+    return "/".join(parts[-2:])[:80]
+
+
+def _bash_write_targets(cmd):
+    """Bash 命令里可可靠识别的写入目标。识别不出 → 空列表（不是"没有写入"）。"""
+    out = []
+    for m in _BASH_REDIR_RX.finditer(cmd or ""):
+        out.append(m.group(1))
+    for m in _BASH_TEE_RX.finditer(cmd or ""):
+        out.append(m.group(1))
+    for m in _BASH_TRUNC_RX.finditer(cmd or ""):
+        out.append(m.group(1))
+    if _BASH_SED_I_RX.search(cmd or ""):
+        toks = [t for t in re.split(r"[\s;&|]+", cmd or "") if t]
+        if toks:
+            out.append(toks[-1])
+    return out
+
+
+def _write_targets(name, tool_input):
+    """这次工具调用【请求】写哪些对象。空列表 = 没识别到写形态。"""
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    if name in _WRITE_TOOLS:
+        p = ti.get("file_path") or ti.get("notebook_path") or ""
+        t = _short_target(p)
+        return [t or "<file>"]
+    if name == "Bash":
+        out = []
+        for p in _bash_write_targets(str(ti.get("command") or "")):
+            t = _short_target(p)
+            if t and t not in out:
+                out.append(t)
+        return out[:4]
+    return []
+
 # 观测归一化：把「HTTP 200」「status: 200」「都是 200」变成同一个 token。
 # 刻意只认这三类可机器比对的观测；其余文本一律不猜。
 _OBS_HTTP_RX = re.compile(r"\b([1-5]\d\d)\b")
@@ -112,8 +171,15 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
       truncated True = 只读了尾部，更早的结果未纳入（因此"0 条结果"不能当成
                        "从未发生过"，调用方必须区别对待）
       results   [{"tool_use_id","tool","is_error","signals":[...],
-                  "chars":N,"digest":"…"}]
+                  "chars":N,"digest":"…",
+                  "after_write":bool,      # 该结果之后是否有【已成功】的写
+                  "writes_after":[目标短串]}]
       errors    失败结果数
+
+    ⚠️ 写操作只在【tool_result 存在且成功】时才算发生；
+       「请求过写入」不等于「写入已经成功」。
+       Bash 只认重定向 / tee / sed -i / truncate 等明确形态，
+       不把任意 Bash 命令当写入。
     """
     if not transcript_path:
         return {"ok": False, "why": "no transcript_path", "results": [],
@@ -133,12 +199,19 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
     lines = text.splitlines()
     if truncated and lines:
         lines = lines[1:]            # 首个残行丢掉
-    lines = lines[-max_lines:]
+    if len(lines) > max_lines:
+        # ⚠️ 3.5.19 修补：行数截断也必须记进 truncated。
+        #    修前这里静默丢弃更早的行，调用方却以为「整个会话都看过了」——
+        #    于是「没找到结果」可能被误当成「没有结果」。
+        truncated = True
+        lines = lines[-max_lines:]
 
     tool_names = {}
-    # 按出现顺序同时收集「工具调用」与「工具结果」。
-    # 这样能回答一个修前答不了的问题：这条结果之后，还有没有写操作？
+    # 按出现顺序同时收集「工具结果」与「已确认发生的写操作」。
+    # 写操作只在它的 tool_result 存在且成功时才入队 ——
+    # 「请求过写入」不等于「写入已经成功」。
     seq = []
+    pending_writes = {}          # tool_use_id -> [(target, tool), ...]
     for ln in lines:
         try:
             d = json.loads(ln)
@@ -155,8 +228,9 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
                 name = b.get("name") or "?"
                 if tid:
                     tool_names[tid] = name
-                if name in _WRITE_TOOLS:
-                    seq.append(("use", name))
+                    _tg = _write_targets(name, b.get("input") or {})
+                    if _tg:
+                        pending_writes[tid] = _tg
             elif t == "tool_result":
                 tid = b.get("tool_use_id") or ""
                 out = _result_text(b)
@@ -168,6 +242,10 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
                         sigs.append(s)
                     if len(sigs) >= 4:
                         break
+                # 写入已成功 → 记一条 write 事件，位置在这条 result 之前，
+                # 反向标记时不会把它算成「这条结果之后的修改」。
+                if tid and not is_err and tid in pending_writes:
+                    seq.append(("write", pending_writes.pop(tid)))
                 seq.append(("result", {
                     "tool_use_id": tid,
                     "tool": tool_names.get(tid, "?"),
@@ -178,16 +256,19 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
                         out.encode("utf-8", "replace")).hexdigest()[:12],
                 }))
         if len(seq) > max_lines * 4:
+            truncated = True     # 提前停止 = 扫描不完整，必须如实记录
             break
 
-    # 反向标记：该结果【之后】是否还有写操作。
-    # ⚠️ 有写操作 ≠ 结果无效；它只说明「这条结果不能代表当前状态」。
-    later_write = False
+    # 反向标记：该结果【之后】有哪些已成功发生的写操作。
+    # ⚠️ 有写操作 ≠ 结果无效 —— 是否能判过期取决于写目标是否与声明相关，
+    #    这一步交给 G3；这里只如实记录目标，不替它下结论。
+    later = []
     for kind, payload in reversed(seq):
-        if kind == "use":
-            later_write = True
+        if kind == "write":
+            later = (list(payload) + later)[:6]
         else:
-            payload["after_write"] = later_write
+            payload["writes_after"] = list(later)
+            payload["after_write"] = bool(later)
 
     results = [p for k, p in seq if k == "result"]
     if len(results) > max_results:
@@ -210,7 +291,8 @@ def summarize(scan):
     concrete = [r for r in rs if r.get("signals")]
     ok_runs = [r for r in rs if not r.get("is_error")]
     stale = [r for r in concrete if r.get("after_write")]
-    extra = "，其中 %d 条之后还有写操作" % len(stale) if stale else ""
+    extra = ("，其中 %d 条之后还有【已成功的】写操作" % len(stale)
+             if stale else "")
     return ("工具结果 %d 条（成功 %d / 失败 %d），其中 %d 条含可核对观测%s"
             % (len(rs), len(ok_runs), int(scan.get("errors") or 0),
                len(concrete), extra))

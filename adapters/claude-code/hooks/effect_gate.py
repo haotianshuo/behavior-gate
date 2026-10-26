@@ -30,7 +30,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (  # noqa: E402
+from _lib import (
+    set_hook_event,  # noqa: E402
     read_input, deny_stop, allow, load_policy, warn_inactive,
     record_gate_event, state_path, load_state, notify_once,
 )
@@ -430,20 +431,32 @@ def analyze(msg):
 # ⚠️ 边界：这是行内字符串判据，不是归属理解。没有显式标记的历史引用
 #    仍由语义评审判断（见 review_unit 的 _CLAIM_PROMPT）。
 #    命中会记事件并打印提示，不是静默放行。
-_HIST_DATE_RX = re.compile(
-    r"(\d{1,2}\s*[/\-月]\s*\d{1,2}|\d{4}\s*[/\-年]\s*\d{1,2}"
-    r"|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b)")
+#
+# ⚠️ 3.5.19 修补（只读核对后）：修前把「日期 / HH:MM」和「此前 / 之前」
+#    都当历史标记，产生两类误剔除：
+#      · 「10/25 的测试通过了」—— 日期本身不证明这是转述；
+#      · 「5/10 项通过」—— 比例被当成日期；
+#      · 「此前失败的两项已修复」—— 这是本轮完成声明，却因「此前」被剔。
+#    现在只认【强指代】：上一轮 / 上一次 / 上次 / 前一轮 / 已有结果 /
+#    已有记录 / 原报告 / 历史记录。日期与「此前 / 之前」不再单独构成
+#    历史引用；判不出就不剔除，交给后面的语义评审。
 _HIST_REF_RX = re.compile(
-    r"(已有(合法)?修复|已有结果|已有记录|上一轮|上一次|上次|此前|之前|前一轮|历史)")
+    r"(已有(合法)?修复|已有结果|已有记录"
+    r"|上一轮|上一次|上次|前一轮|原报告|历史记录|历史结果)")
+# ⚠️ 日期 / HH:MM 时间戳【不参与判定】——「10/25 的测试通过了」不是转述，
+#    「5/10 项通过」也不是日期。这里刻意不保留日期正则：保留它就会有人
+#    再把「日期 = 历史」加回来。需要时间的场合由语义评审判归属。
 # 当前语态否决词：出现即【不算历史引用】。
-# 3.5.19 补充「现已 / 目前」—— 既有回归用例 B6「此前的问题现已修复」
-# 就是在确认【当前】状态，曾有历史标记（此前）但必须按当前声明处理。
 _HIST_CURRENT_VETO_RX = re.compile(
     r"(现在|现已|目前|本轮|这次|本次|这轮|刚|刚刚|今天)")
 
 
 def _historical_reference(seg):
-    """若这一句在确认更早的结果，返回该句；否则 None。"""
+    """若这一句在确认更早的结果，返回该句；否则 None。
+
+    ⚠️ 只有【强指代】且出现在完成词之前才算；日期不参与判定。
+       判不出就返回 None（= 保留检查），不靠扩大关键词表来猜。
+    """
     if not seg or not CLAIM_RX.search(seg):
         return None
     if _HIST_CURRENT_VETO_RX.search(seg):
@@ -452,10 +465,9 @@ def _historical_reference(seg):
         c = CLAIM_RX.search(sent)
         if not c:
             continue
-        for rx in (_HIST_DATE_RX, _HIST_REF_RX):
-            m = rx.search(sent)
-            if m and m.start() <= c.start():
-                return sent.strip()
+        m = _HIST_REF_RX.search(sent)
+        if m and m.start() <= c.start():
+            return sent.strip()
     return None
 
 
@@ -517,17 +529,49 @@ def _signals_text(r):
     return " ".join(r.get("signals") or [])
 
 
+def _write_relevance(asserted, targets):
+    """写操作是否与声明提到的对象相关。
+
+    True  = 写目标的文件名出现在声明里 → 相关修改
+    None  = 判不出（目标是 `<file>` 或声明里没提任何具体文件）
+    False = 看得到的目标都不在声明里（仍不足以证明无关）
+    """
+    if not targets:
+        return False
+    a = asserted or ""
+    known = False
+    for t in targets:
+        base = str(t).split("/")[-1]
+        if base and base != "<file>":
+            known = True
+            if base in a:
+                return True
+    return False if known else None
+
+
 def _backing_state(asserted, scan, obs_tokens):
     """把「发现观测」与「支持当前声明」分开。
 
     返回 kind（互斥）：
-      matched     声明里的具体观测在【成功结果】里找到对应，且之后无写操作
-      stale       找到了对应，但那之后还有写操作 → 结果不能代表当前状态
-      unmatched   声明里有具体观测，结果里找不到对应（可能被截断）
-      repro       无具体观测，声明是「已复现/预期失败」，且有失败结果
-      generic     有成功结果，但没有任何具体观测能与声明对齐
-      failed_only 只有失败结果，且声明不是复现类
-      none        没有任何可核对观测
+      matched          声明里的观测在【成功结果】里找到对应，
+                       且那条结果之后没有写操作
+      stale            找到对应，但之后写到了【声明提到的对象】
+      write_unconfirmed 找到对应，但之后有写操作、无法确认是否影响该对象
+      unmatched        声明里有具体观测，结果里找不到对应（可能被截断）
+      repro            声明是「已复现/预期失败」，且声明里的可核对特征
+                       （错误码 / 退出码）出现在失败结果里
+      repro_unconfirmed 复现类声明无法与具体失败结果关联（未确认）
+      generic          有成功结果，但没有任何具体观测能与声明对齐
+      failed_only      只有失败结果，且声明不是复现类
+      none             没有任何可核对观测
+
+    ⚠️ 3.5.19 修补：
+      · 修前只要有一条 matched 结果 stale 就判整条 stale —— 于是
+        「旧结果过期、后来重新取得有效结果」会被否定。现在先看 fresh：
+        存在 after_write 为空的 matched → matched。
+      · 写操作是否让结果失效，取决于它改的是不是同一个对象；
+        判不出时记 write_unconfirmed（未确认），不直接判过期。
+      · repro 要求失败结果【含可核对观测】，不能拿任意失败凑证据。
 
     ⚠️ 本函数不做语义理解：只比对字面观测，不判断对象/操作是否同一件事。
        因此 matched 也只表示「观测可对照」，不表示「结论为真」。
@@ -541,14 +585,33 @@ def _backing_state(asserted, scan, obs_tokens):
         ok_obs |= obs_tokens(_signals_text(r))
     matched = [r for r in ok if obs_tokens(_signals_text(r)) & claim_obs] \
         if claim_obs else []
-    stale = any(r.get("after_write") for r in matched)
+    fresh = [r for r in matched if not r.get("writes_after")]
+    stale_matched = [r for r in matched if r.get("writes_after")]
+    _targets = []
+    for r in stale_matched:
+        _targets.extend(r.get("writes_after") or [])
+    relevance = _write_relevance(asserted, _targets) if stale_matched else False
     repro = bool(_REPRO_RX.search(asserted or ""))
 
-    if claim_obs:
-        kind = ("stale" if (matched and stale)
-                else "matched" if matched else "unmatched")
-    elif repro and err:
-        kind = "repro"
+    if repro:
+        # ⚠️ 3.5.19 修补（第二次）：修前只要「有复现声明 + 会话里有一条
+        #    带观测的失败结果」就记 repro —— 但「有失败信息」不等于
+        #    「就是这个问题的失败信息」。现在要求声明里的可核对特征
+        #    （错误码 / 退出码）出现在【失败结果】里；声明里没有可核对
+        #    特征时无法关联，记为未确认（repro_unconfirmed），不当证据。
+        if claim_obs:
+            _err_hit = [r for r in err
+                        if obs_tokens(_signals_text(r)) & claim_obs]
+            kind = "repro" if _err_hit else "repro_unconfirmed"
+        else:
+            kind = "repro_unconfirmed"
+    elif claim_obs:
+        if fresh:
+            kind = "matched"
+        elif stale_matched:
+            kind = "stale" if relevance is True else "write_unconfirmed"
+        else:
+            kind = "unmatched"
     elif any(r.get("signals") for r in ok):
         # 有成功结果、也有可核对观测，但声明里没有具体观测可供对齐
         kind = "generic"
@@ -562,7 +625,9 @@ def _backing_state(asserted, scan, obs_tokens):
         "claim_obs": sorted(claim_obs),
         "ok_obs": sorted(ok_obs),
         "matched": len(matched),
-        "stale": bool(stale),
+        "fresh": len(fresh),
+        "stale": len(stale_matched),
+        "write_relevance": relevance,
         "ok_results": len(ok),
         "err_results": len(err),
         "repro": repro,
@@ -1278,6 +1343,7 @@ def _semantic_find_claims(asserted, policy, session_id, deadline):
 
 def main():
     data = read_input()
+    set_hook_event("Stop")
 
     # ⚠️ stop_hook_active 的正确用法（3.5.9 修正，见 #43）。
     #
@@ -1677,8 +1743,18 @@ def main():
         # 其余情况：允许交付，但【不记为已验证】。
         if _b["kind"] == "stale":
             _rule, _key = ("results_superseded_by_later_edit", "stale")
-            _why = ("声明里的观测确实出现过，但那之后还有写操作；\n"
+            _why = ("声明里的观测确实出现过，但那之后写到了声明提到的对象；\n"
                     "    那条结果不能代表当前状态")
+        elif _b["kind"] == "write_unconfirmed":
+            _rule, _key = ("results_write_impact_unconfirmed", "write-unconfirmed")
+            _why = ("声明里的观测确实出现过，但那之后有写操作；\n"
+                    "    无法确认写的是不是同一个对象 —— 因此不判过期，也不记已验证")
+        elif _b["kind"] == "repro_unconfirmed":
+            _rule, _key = ("repro_without_matching_failure", "repro-unconfirmed")
+            _why = ("声明是「已复现 / 预期失败」，但正文里没有可核对的错误特征"
+                    "（错误码 / 退出码），\n"
+                    "    或失败结果里没有对应观测 —— 无法确认就是这个问题，"
+                    "因此不记已验证")
         elif _b["kind"] == "unmatched":
             _rule, _key = ("claim_observation_not_matched", "unmatched")
             _why = ("声明里的具体观测（%s）没有在本会话的成功结果里找到对应。\n"
@@ -1733,7 +1809,12 @@ def main():
         # 3.5.19 修补：「已复现 / 预期失败」类声明没有证据块时也应有路。
         #   失败观测不能支撑「通过」，但能支撑「复现了这个错误」。
         #   要求本会话确实有【失败的工具结果】，否则照旧打回。
-        _repro_inline = bool(_REPRO_RX.search(asserted)) and not _inline
+        # ⚠️ 3.5.19 修补（第三次）：修前这里是 `... and not _inline` ——
+        #    正文一旦出现可识别的行内观测（例如「已复现，HTTP 500」），
+        #    复现分支就被关掉，转而走普通成功观测路径，永远查不到
+        #    对应的失败结果。现在复现声明【优先】走失败结果判断；
+        #    匹配不足时记未确认，也不再落到成功观测路径。
+        _repro_inline = bool(_REPRO_RX.search(asserted))
         if (_inline or _repro_inline) and effective_risk != "高":
             # ⚠️ 3.5.19 修补：正文里写「exit code 0」不能自行成为证据。
             #    修前这里只搜正文，于是「本会话零工具结果、只写一句 200」
@@ -1751,13 +1832,25 @@ def main():
             _iok = [r for r in _iall if not r.get("is_error")]
             _ierr = [r for r in _iall if r.get("is_error")]
             _observed = (_inline.group(0)[:60] if _inline else "复现/预期失败")
-            _iclaim = obs_tokens(_inline.group(0)) if _inline else set()
+            # ⚠️ 一律从【完整正文】抽可核对特征 —— 复现声明里可能同时出现
+            #    行内片段（「已复现，HTTP 500」）；只取片段会丢掉声明里的
+            #    其他错误特征，也会让两条路径的判据不一致。
+            _iclaim = obs_tokens(asserted)
             _iobs = set()
             for _r in _iok:
                 _iobs |= obs_tokens(" ".join(_r.get("signals") or []))
-            _ihit = bool(_iclaim & _iobs)
+            # ⚠️ 与证据块走同一套判断：命中结果里必须有一条【之后没有写操作】，
+            #    否则不能当成本轮有效的对照（旧结果被后续修改覆盖）。
+            _imatched = [r for r in _iok
+                         if obs_tokens(" ".join(r.get("signals") or "")) & _iclaim]
+            _ifresh = [r for r in _imatched if not r.get("writes_after")]
+            _ihit = bool(_ifresh)
 
-            if _iscan_ok and _repro_inline and _ierr:
+            _ierr_hit = [r for r in _ierr
+                         if obs_tokens(" ".join(r.get("signals") or ""))
+                         & _iclaim]
+            if _iscan_ok and _repro_inline and _ierr_hit:
+                # 失败结果与声明里的可核对特征对上了，才支撑「已复现」。
                 # 失败观测支撑「已复现 / 预期失败」这一【具体结论】。
                 # ⚠️ 它不支撑「测试通过」—— 两者在这里分开记。
                 record_gate_event(
@@ -1771,11 +1864,16 @@ def main():
                                 "【G3 生效门】按【复现 / 预期失败】放行"
                                 "（风险级别：%s）。\n"
                                 "  ⚠️ 失败结果只支撑「复现了这个错误」，"
-                                "不支撑「已通过」。"
+                                "不支撑「已通过」。\n"
+                                "  ⚠️ 相同错误码 / 退出码只证明【字面一致】，"
+                                "不证明是同一个问题（两个无关错误都可能返回 "
+                                "exit code 1）。"
                                 % effective_risk)
                 allow()
 
-            if _iscan_ok and _ihit:
+            # 复现声明只由失败结果支撑：关联不上就保持未确认，
+            # 不能改走「成功观测」路径拿一个 corroborated。
+            if _iscan_ok and _ihit and not _repro_inline:
                 record_gate_event(
                     "G3", "inline_evidence_corroborated",
                     "allow_by_inline_evidence", tool="Stop",
@@ -1801,11 +1899,19 @@ def main():
                            "scan_ok": _iscan_ok, "truncated": _itrunc,
                            "delivery_channel": "additionalContext"})
                 if not retry:
+                    if _repro_inline and not _iclaim:
+                        _why = ("声明是「已复现 / 预期失败」，但正文里没有"
+                                "可核对的错误特征（错误码 / 退出码），\n"
+                                "         无法确认失败结果是否属于这个问题")
+                    elif _repro_inline:
+                        _why = ("声明里的错误特征没有在失败结果里找到对应")
+                    elif _itrunc:
+                        _why = "transcript 已截断，无法对照"
+                    else:
+                        _why = "无法在本会话的工具结果里找到对应"
                     notify_once(_isid, "G3:inline-unconfirmed",
-                                "【G3 生效门】正文里有具体观测，但%s。\n"
-                                "  ⚠️ 本轮不记为已验证；请按事实措辞。"
-                                % ("transcript 已截断，无法对照" if _itrunc
-                                   else "无法在本会话的工具结果里找到对应"))
+                                "【G3 生效门】%s。\n"
+                                "  ⚠️ 本轮不记为已验证；请按事实措辞。" % _why)
                 allow()
             # 零结果且未截断 → 不接受行内证据，落到下面 _reject
 

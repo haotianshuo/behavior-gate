@@ -32,9 +32,10 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (  # noqa: E402
+from _lib import (
+    set_hook_event,  # noqa: E402
     read_input, deny, allow, warn_inactive, warn_gate, state_path, load_state,
-    load_state_strict,
+    load_state_strict, save_state,
     strip_referenced_text,
 )
 
@@ -532,10 +533,10 @@ def _semantic_excerpt(prompt, maxlen=60):
 def scan_prompt_into_state(prompt, state_path_):
     """兼容旧调用：扫描并且立即写回。
 
-    ⚠️ 3.5.17 核实：本函数全仓【零调用】（inject_budget 用的是 scan_prompt），
-       且它引用的 save_state 【未在本文件 import】—— 一旦被调用会 NameError。
-       本次【不删也不改】：它不属于本轮授权的三处误识别，
-       删除或补 import 都会改变对外行为。如实登记，交由后续决定。
+    ⚠️ 3.5.17 核实：本函数全仓【零调用】（inject_budget 用的是 scan_prompt）。
+    ⚠️ 3.5.19 修补：此前它引用的 save_state 未在本文件 import，
+       一旦被外部调用会 NameError。本轮补上 import（不改行为，只消除崩溃点）；
+       函数本身仍保留，删除与否留给后续决定。
     """
     st = load_state(state_path_) or {}
     no_ask, no_verify = scan_prompt(prompt, st)
@@ -802,10 +803,44 @@ def test_writes(cmd):
         return True
     # jest / vitest 的 `-u` = 更新快照。只在这两个运行器出现时才把 -u 当写入，
     # 避免把其他命令里含义不同的 -u 误判成写操作。
+    # ⚠️ `npm test -- -u` / `yarn test -u` 不在此列：实际运行器由 package.json
+    #    决定，本门读不到，所以不据此硬拦（只走 warn）。
     if re.search(r"\b(jest|vitest)\b", c, re.I) and \
             re.search(r"(?:^|\s)-u(?:\s|$)", c):
         return True
     return False
+
+
+# 条件类型：只有【写入相关】的条件才适用 test_writes 的静态标志检查。
+# 修前无论条件是「会写数据的测试」还是「耗时超过 5 分钟的测试」，
+# 都拿写入标志去判 —— 条件与判据不是同一维度，判出来的结论没有意义。
+_COND_WRITE_RX = re.compile(
+    r"(写|数据|快照|snapshot|文件|数据库|落盘|持久)", re.I)
+_COND_OTHER = (
+    ("time", re.compile(
+        r"(耗时|慢|时间|分钟|秒|超时|timeout|duration|speed)", re.I)),
+    ("network", re.compile(
+        r"(网络|联网|请求|接口|端口|http|network|online|api)", re.I)),
+    ("object", re.compile(
+        r"(这个|那个|该|指定|只|仅|除|某|模块|目录|包|组件)", re.I)),
+)
+
+
+def condition_kind(cond):
+    """用户限制的条件属于哪一类。
+
+    write / time / network / object / other / unspecified
+    ⚠️ 这是关键词分类，不是语义理解；分不出时归 other（不适用写入标志）。
+    """
+    c = (cond or "").strip()
+    if not c:
+        return "unspecified"
+    if _COND_WRITE_RX.search(c):
+        return "write"
+    for name, rx in _COND_OTHER:
+        if rx.search(c):
+            return name
+    return "other"
 
 
 # ---------------------------------------------------------------- 来源引用
@@ -850,6 +885,7 @@ def _source_line(frag, rule_zh, source=None):
 
 def main():
     data = read_input()
+    set_hook_event("PreToolUse")
     session_id = data.get("session_id") or "nosession"
     tool = data.get("tool_name") or ""
     ti = data.get("tool_input") or {}
@@ -931,14 +967,21 @@ def main():
         cmd = ti.get("command") or ""
         if is_test_command(cmd):
             if verify_cond:
-                # 带条件的禁测：只在【静态可见的写入标志】出现时才拦。
-                if test_writes(cmd):
+                # ⚠️ 3.5.19 修补：先看条件是哪一类，再看是否命中。
+                #   修前无条件地用「写入标志」判断，于是条件是
+                #   「耗时超过 5 分钟的测试」「联网的测试」时，判据与条件
+                #   不是同一维度 —— 判出来的结论没有意义。
+                #   现在只有【写入相关】的条件才用写入标志；
+                #   其它类型一律不硬拦，只提示「本门判断不了」。
+                _ckind = condition_kind(verify_condition)
+                if _ckind == "write" and test_writes(cmd):
                     deny(
                         "【G7 意图门】用户本会话的禁测是【带条件】的。\n"
                         "  条件：%s\n"
                         "%s"
                         "  命令：%s\n"
-                        "  该命令带明确的写入/更新标志，判定落在上述条件内。\n"
+                        "  条件与【写入】相关，而该命令带明确的写入/更新标志，\n"
+                        "  判定落在上述条件内。\n"
                         "\n"
                         "  请改用只读方式验证（不写快照、不改文件、不写数据）。\n"
                         "  如果用户现在允许了，让他写 `verify: on`。"
@@ -948,24 +991,35 @@ def main():
                         gate_id="G7", rule_id="verification_disabled_conditional",
                         tool=tool, session_id=data.get("session_id"),
                     )
-                # 没有可见写入标志 → 不硬拦，只提示。
+                # 未命中或条件类型不适用 → 不硬拦，只提示。
                 # 边界：静态检查看不到 fixture / conftest / 被测代码是否写数据。
+                if _ckind == "write":
+                    _why = ("条件与写入相关，但没有检测到明确的写入标志，因此【没有拦截】。\n"
+                            "  ⚠️ 条件只做了【静态近似】：看到 --write / --fix / "
+                            "jest·vitest 的 -u 才拦；\n"
+                            "     fixture / conftest / 被测代码是否写数据，本门看不到。\n"
+                            "     所以这不是「条件不成立」，而是「本门只能确认到这一步」。")
+                else:
+                    _why = ("条件类型是【%s】，不是写入相关，本门【没有可用的静态判据】，"
+                            "因此【没有拦截】。\n"
+                            "  ⚠️ 这不代表条件已满足，也不代表条件已被排除 —— "
+                            "只是本门无法在工具调用前判断它。" % _ckind)
                 warn_gate(
                     "G7", "verification_conditional_allowed",
                     "【G7 意图门】用户本会话的禁测是【带条件】的。\n"
                     "  条件：%s\n"
                     "%s"
                     "  命令：%s\n"
-                    "  本次是测试命令，但没有检测到明确的写入标志，因此【没有拦截】。\n"
-                    "  ⚠️ 条件只做了【静态近似】：看到 --write / --fix / -u 这类标志才拦；\n"
-                    "     fixture / conftest / 被测代码是否写数据，本门看不到。\n"
-                    "     所以这不是「条件不成立」，而是「本门只能确认到这一步」。\n"
+                    "  %s"
                     % (verify_condition or "(未给出)",
                        _source_line(verify_frag, "不需要测试", intent_source),
-                       cmd[:150]),
+                       cmd[:150], _why),
                     tool=tool, session_id=data.get("session_id"),
                     extra={"condition": verify_condition or "",
-                           "condition_evaluated": "static-write-flag-only"})
+                           "condition_kind": _ckind,
+                           "condition_evaluated": (
+                               "static-write-flag-only" if _ckind == "write"
+                               else "not-evaluated")})
             else:
                 deny(
                     "【G7 意图门】用户在本会话说过不需要测试，但你正在跑测试。\n"

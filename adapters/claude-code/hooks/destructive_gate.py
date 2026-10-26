@@ -24,7 +24,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (  # noqa: E402
+from _lib import (
+    set_hook_event,  # noqa: E402
     read_input, deny, allow, load_policy, warn_inactive, warn_gate,
 )
 
@@ -454,21 +455,57 @@ _WRITE_RX = re.compile(
     r"|\.(?:write|import|restore|dump)\b"
     r"|>\s*[\"']?[^\s\"'|;&]*\.db\b"
     r"|\b(?:cp|mv|rm|chmod|chown|truncate|touch)\b[^\n;&|]*\.db\b"
+    # 3.5.19 修补：tee / sed -i 写 .db 也是写
+    r"|\btee\s+(?:-a\s+)?[^\s;&|]*\.db\b"
+    r"|\bsed\s+-i[^\n;&|]*\.db\b"
     r"|open\s*\(\s*[^)\n]*\.db[^)\n]*['\"](?:w|a|w\+|a\+|r\+))", re.I)
 
 
+# 设置型 PRAGMA（会改数据库文件或连接状态）。
+# ⚠️ 3.5.19 修补：PRAGMA 不能一律当只读 —— `journal_mode=WAL`、
+#    `optimize`、`wal_checkpoint` 都会写库。
+_PRAGMA_WRITE_RX = re.compile(
+    # 无参数也是写/执行
+    r"(\bPRAGMA\s+(?:optimize|wal_checkpoint|incremental_vacuum)\b"
+    # 赋值形式才是写（`PRAGMA journal_mode` 单独出现是读当前值）
+    r"|\bPRAGMA\s+(?:journal_mode|writable_schema|user_version|application_id"
+    r"|schema_version|auto_vacuum|page_size|encoding|secure_delete)\b\s*=)",
+    re.I)
 # 明确只读的形态。只有它命中、且没有写形态时才算「已确认只读」。
 # 刻意保守：`< file.sql`、`python x.py`、`sh -c "..."` 都不在这里 ——
 # 那些是「未知」，不是「只读」。
 _READ_RX = re.compile(
-    r"(\b(?:SELECT|PRAGMA|EXPLAIN)\b"
+    r"(\b(?:SELECT|EXPLAIN)\b"
+    r"|\bPRAGMA\b"
     r"|\.(?:schema|tables|indexes)\b"
     r"|\b(?:ls|dir|file|stat|head|tail|wc)\b)", re.I)
 
+# 管道右侧只有这些命令时，整条管道仍可视为只读。
+# 其它（sqlite3 / sh / tee / sed -i …）一律 unknown。
+_PIPE_RX = re.compile(r"\|\s*([A-Za-z0-9_.\\/-]+)")
+_PIPE_READ_CMDS = frozenset({
+    "head", "tail", "grep", "wc", "less", "more", "cat", "sort",
+    "uniq", "cut", "awk", "jq", "column", "strings",
+})
+
 
 def _looks_like_write(text):
-    """文本里是否有明确的写操作形态。"""
+    """文本里是否有明确的写操作形态。
+
+    ⚠️ 3.5.19 修补后，警告规则改用 _write_nature() 的三态判断；
+       本函数保留为对外兼容的薄封装（外部脚本可能导入）。
+       新代码不要再直接用它 —— 二值会丢掉「unknown」。
+    """
     return bool(_WRITE_RX.search(text or ""))
+
+
+def _pipe_all_readonly(t):
+    """管道右侧是否全是只读命令。任一不是 → False（整条不能算只读）。"""
+    for m in _PIPE_RX.finditer(t or ""):
+        cmd = m.group(1).split("/")[-1].lower()
+        if cmd not in _PIPE_READ_CMDS:
+            return False
+    return True
 
 
 def _write_nature(text):
@@ -477,13 +514,21 @@ def _write_nature(text):
     ⚠️ 这是【静态字符串判据】，不是内容分析：
        `sqlite3 db < data.sql`、`python migrate.py`、`cat x | sh`
        都读不出实际目标 —— 它们一律是 unknown，不是 read。
+
+    ⚠️ 3.5.19 修补：
+      · PRAGMA 不再一律当只读：赋值型与 optimize/wal_checkpoint 记为 write；
+      · 管道右侧不是已知只读命令 → unknown（`| tee db`、`| sh` 等）；
+      · 只含 SELECT 但同一命令里还有写形态 → 由 _WRITE_RX 先判为 write，
+        不会因为出现 SELECT 就整条放成 read。
     """
     t = text or ""
-    if _WRITE_RX.search(t):
+    if _WRITE_RX.search(t) or _PRAGMA_WRITE_RX.search(t):
         return "write"
     # `cat dump.sql | sqlite3 app.db` 看着像只读（cat 在命令位），
     # 实际是把内容喂给数据库 —— 归 unknown，不归 read。
     if re.search(r"\|\s*(?:sqlite3|psql|mysql|mariadb)\b", t, re.I):
+        return "unknown"
+    if not _pipe_all_readonly(t):
         return "unknown"
     if _READ_RX.search(t):
         return "read"
@@ -504,8 +549,24 @@ _HEREDOC_DOC_CMDS = {"cat", "tee", "printf", "echo"}
 _HEREDOC_RX = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
+# heredoc 正文里可能发生命令替换的形态。未加引号的分隔符会做变量展开和
+# 命令替换 —— 正文里的 $(...) / `...` 会【真的执行】。
+_HEREDOC_EXEC_RX = re.compile(r"(\$\(|`|\$\{)")
+
+
 def _heredoc_doc_ranges(cmd):
-    """返回 heredoc 正文的 (start, end) 字符区间 —— 仅限不会被执行的正文。"""
+    """返回 heredoc 正文的 (start, end) 区间 —— 仅限【不会被执行】的正文。
+
+    ⚠️ 3.5.19 修补（只读核对后）：修前只要分隔符出现在 cat/tee 行里就豁免，
+       没有看分隔符是否加引号。`cat <<EOF` 里的 `$(rm -rf /)` 会被 bash
+       先做命令替换再传给 cat —— 正文不是"文档"，是【会执行的内容】。
+       现在只有下面三条同时成立才豁免：
+         · 命令位是 cat/tee/printf/echo；
+         · 分隔符【带引号】（`<<'EOF'` / `<<"EOF"`）—— 或正文里没有
+           命令替换形态；
+         · opener 行没有管道（`cat <<EOF | sh` 整段会执行）。
+       判不出的形态一律不豁免（宁可多检查，不扩大文档豁免）。
+    """
     if not cmd or "<<" not in cmd:
         return []
     lines = cmd.splitlines(True)
@@ -534,6 +595,12 @@ def _heredoc_doc_ranges(cmd):
         while j < len(lines) and lines[j].strip() != tag:
             j += 1
         end = offs[j] if j < len(lines) else len(cmd)
+        body = cmd[start:end]
+        quoted = bool(m.group(1))          # 分隔符带引号 = 不做展开
+        if not quoted and _HEREDOC_EXEC_RX.search(body):
+            # 未加引号 + 正文含命令替换 → 不豁免
+            i = j + 1
+            continue
         ranges.append((start, end))
         i = j + 1
     return ranges
@@ -623,6 +690,7 @@ def _compile(rules, where="?"):
 
 def main():
     data = read_input()
+    set_hook_event("PreToolUse")
     tool = data.get("tool_name") or ""
     ti = data.get("tool_input") or {}
     policy = load_policy()
@@ -780,11 +848,18 @@ def main():
         if not text:
             continue
         for rule, rx in rules:
-            m = rx.search(text)
+            # ⚠️ 3.5.19 修补：修前只用 rx.search 取【第一个】匹配，落在
+            #    heredoc 文档正文里就 continue —— 于是同一段命令后面
+            #    【真正执行】的危险写法被整条跳过（漏检）。
+            #    现在遍历全部匹配，跳过文档区间后取第一个有效命中。
+            m = None
+            for _m in rx.finditer(text):
+                if skip_ranges and any(a <= _m.start() < b
+                                       for a, b in skip_ranges):
+                    continue
+                m = _m
+                break
             if not m:
-                continue
-            # heredoc 正文里命中命令规则 → 那是写入内容，不是执行
-            if skip_ranges and any(a <= m.start() < b for a, b in skip_ranges):
                 continue
             # 3.5.19 修补：「读不出内容」必须与「已确认只读」分开。
             #   修前这里是二值：没有写形态就当成只读并静默跳过 ——

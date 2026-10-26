@@ -20,7 +20,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (  # noqa: E402
+from _lib import (
+    set_hook_event,  # noqa: E402
     read_input, deny, allow, warn_inactive, load_policy,
     state_path, load_state, locked_update, safe_cap,
 )
@@ -28,6 +29,7 @@ from _lib import (  # noqa: E402
 
 def main():
     data = read_input()
+    set_hook_event("PreToolUse")
     session_id = data.get("session_id") or "nosession"
     agent_id = data.get("agent_id")          # 有值 = 当前在子代理里
     tool_input = data.get("tool_input") or {}

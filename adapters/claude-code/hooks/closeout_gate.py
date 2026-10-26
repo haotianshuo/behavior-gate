@@ -37,7 +37,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (  # noqa: E402
+from _lib import (
+    set_hook_event,  # noqa: E402
     read_input, allow, state_path, locked_update, load_policy, load_state,
     warn_gate, warn_inactive,
 )
@@ -134,6 +135,7 @@ def _record(st, session_id, tool, ti, agent_id):
 
 def main():
     data = read_input()
+    set_hook_event("PreToolUse")
     session_id = data.get("session_id") or "nosession"
     tool = data.get("tool_name") or ""
     ti = data.get("tool_input") or {}

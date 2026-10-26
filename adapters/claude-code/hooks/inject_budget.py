@@ -16,7 +16,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (  # noqa: E402
+from _lib import (
+    set_hook_event,  # noqa: E402
     read_input, emit_text, load_policy, parse_budget_from_prompt,
     state_path, save_state, load_state, locked_update, allow,
 )
@@ -24,6 +25,7 @@ from _lib import (  # noqa: E402
 
 def main():
     data = read_input()
+    set_hook_event("UserPromptSubmit")
     session_id = data.get("session_id") or "nosession"
     prompt = data.get("prompt") or ""
 

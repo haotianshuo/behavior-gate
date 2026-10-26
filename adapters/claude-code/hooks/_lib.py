@@ -87,16 +87,38 @@ _PENDING = {"model": [], "user": []}
 
 
 def _pending_payload(hook_event, extra_hso=None):
-    """把待发提醒拼成宿主 JSON 片段。没有待发内容时返回 None。"""
+    """把待发提醒拼成宿主 JSON 片段。没有待发内容时返回 None。
+
+    ⚠️ 3.5.19 修补（第二次）：hookSpecificOutput 必须带 hookEventName ——
+       这是官方 schema 的必填字段。上一版只是把 hook_event 当参数传进来、
+       却没有写进对象，等于「填好了收件人信息，却没写到信封上」：
+       宿主 schema 校验失败仍按非阻断错误处理，提醒照旧不送达。
+       现在只要输出 hookSpecificOutput，就补上事件名。
+    """
+    he = hook_event or _INPUT_META.get("hook_event") or "PreToolUse"
     hso = dict(extra_hso or {})
     if _PENDING["model"]:
         hso["additionalContext"] = "\n".join(_PENDING["model"])
     obj = {}
     if hso:
+        hso.setdefault("hookEventName", he)
         obj["hookSpecificOutput"] = hso
     if _PENDING["user"]:
         obj["systemMessage"] = "\n".join(_PENDING["user"])
     return obj or None
+
+
+def set_hook_event(name):
+    """显式声明本进程处理的事件类型。
+
+    ⚠️ 3.5.19 修补：输出 hookSpecificOutput 时 hookEventName 必须是
+       【这个事件】的名字。真实宿主会传 hook_event_name，但门不能把
+       正确性押在"payload 一定有"上 —— 缺失时会让 Stop 的提醒被包成
+       PreToolUse schema，宿主解析失败即等于没送达。
+       各门在 main 开头显式声明自己注册的事件。
+    """
+    if name:
+        _INPUT_META["hook_event"] = name
 
 
 def emit_context(text, deliver="model"):
