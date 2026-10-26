@@ -11,6 +11,7 @@ exit code 是本方案唯一有强制力的信号，所以必须实测，不能�
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -343,8 +344,16 @@ def main():
         {"session_id": sd8, "tool_name": "Bash",
          "tool_input": {"command": "echo hi"}}, tmp)
     st8 = json.load(open(co8p, encoding="utf-8"))
+    # ⚠️ 3.5.19（修正方案第 5 项）：判重键改成「完整命令 SHA-256 前 16 位|规范正文」，
+    #    修前断言 bash_cmds == ["echo hi"] 记的是【修前格式】。
+    #    这里断言的仍是同一件事（自愈后确实记下这条命令），只是按新格式核对：
+    #    16 位十六进制摘要 + "|" + 命令正文，且前缀与正文都来自这条命令。
+    _bc8 = st8.get("bash_cmds")
     check("审计新增 null 状态自愈：bash_cmds 记回 list 并有新记录",
-          st8.get("bash_cmds") == ["echo hi"], str(st8.get("bash_cmds")))
+          isinstance(_bc8, list) and len(_bc8) == 1
+          and isinstance(_bc8[0], str)
+          and re.fullmatch(r"[0-9a-f]{16}\|echo hi", _bc8[0]) is not None,
+          str(_bc8))
     check("审计新增 null 状态自愈：webfetch_count 归零为 int",
           st8.get("webfetch_count") == 0, str(st8.get("webfetch_count")))
 

@@ -216,8 +216,16 @@ def main():
 
     # ---------- 8. 隐私 ----------
     print("\n----- 8. 隐私回归 -----")
+    # ⚠️ 3.5.19（审计修正项 1）新增三个字段：
+    #    tool_use_id（关联同一次工具调用的开始与结束）、
+    #    hook_event（哪个宿主事件触发的）、elapsed_ms（本进程耗时）。
+    #    它们都是标识/计数，不含原始 command / prompt / 正文。
+    #    warn / inactive 事件另带 gate_name 与 why（规范化后的短原因）；
+    #    下面的「不含原始文本」断言仍然守着真正在意的那一类内容。
     allowed = {"ts", "session", "gate_id", "rule_id", "decision", "tool",
-               "source_class", "version", "source_snapshot"}
+               "source_class", "version", "source_snapshot",
+               "tool_use_id", "hook_event", "elapsed_ms",
+               "gate_name", "why"}
     all_ev = []
     for dd in (d, d3, d4, d5, d6, d7, d8, d9, d10):
         all_ev += events(dd)
@@ -270,14 +278,24 @@ def main():
     os.makedirs(os.path.join(d11, "gate-events.jsonl.lock"), exist_ok=True)
     env11 = {**os.environ, "PYTHONIOENCODING": "utf-8",
              "CLAUDE_BUDGET_STATE_DIR": d11}
+    # ⚠️ 3.5.19：阈值改为【相对基线】，不再断言墙钟绝对值。
+    #    修前断言 el < 1.0 —— 这在 Python 冷启动就要 2 秒的机器上
+    #    （本机实测 `python -c pass` 2.07s）无论如何都失败，
+    #    测的是机器启动开销，不是「锁被占时是否额外等待」。
+    #    要守的不变量是：锁竞争【没有多加】约 3 秒的默认锁超时。
+    tb = time.time()
+    subprocess.run([sys.executable, "-c", "pass"], capture_output=True,
+                   env=env11, timeout=30)
+    base = time.time() - tb
     t0 = time.time()
     p11 = subprocess.run(
         [sys.executable, os.path.join(HOOKS, "destructive_gate.py")],
         input=json.dumps(bash_payload(RM + " " + R + " /", "s11b")).encode("utf-8"),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env11, timeout=30)
     el = time.time() - t0
-    check("锁被占时 deny 不等待（< 1 秒）", el < 1.0,
-          "实际 %.2f 秒（修前是 3.09 秒）" % el)
+    check("锁被占时 deny 不等待（相对基线 < 1 秒）", (el - base) < 1.0,
+          "实际 %.2f 秒，基线(空进程) %.2f 秒，净增 %.2f 秒（修前净增约 3 秒）"
+          % (el, base, el - base))
     check("锁被占时判定不变（rc=2）", p11.returncode == 2,
           "rc=%d" % p11.returncode)
     # 拿不到锁 → 该事件被丢弃（这是设计：观测不值得让门等）

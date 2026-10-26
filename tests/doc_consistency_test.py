@@ -59,6 +59,16 @@ def discover_suites():
 
 SUITES = discover_suites()
 
+# ⚠️ 3.5.19：单个套件的超时从写死的 120s 改为可配（默认不变）。
+#    原因：120s 隐含「每个套件都能在 120 秒内跑完」，但那取决于机器 ——
+#    本机 Python 冷启动实测 2.07s（`python -c pass`），
+#    一次套件动辄几十个 subprocess，adversarial / four_gate / intent_gate /
+#    upgrade_path 会稳定超过 120s，于是「有套件未跑通」恒亮，
+#    文档数字检查全部跳过 —— 检查器被环境卡死，而不是发现了文档问题。
+#    默认值保持不变（CI 行为不变）；慢机器上用
+#    `GATE_DOC_SUITE_TIMEOUT=900 python tests/doc_consistency_test.py`。
+SUITE_TIMEOUT = int(os.environ.get("GATE_DOC_SUITE_TIMEOUT", "120"))
+
 # ⚠️ 「全部套件」的口径必须只定义一处。
 #   SUITES 排除了自己（它递归跑其它套件，不能自我递归）；
 #   但文档里列的清单【包含】doc_consistency_test —— 所以对外计数是 +1。
@@ -112,10 +122,11 @@ def actual_total():
         try:
             p = subprocess.run(
                 [sys.executable, os.path.join(PKG, "tests", s + ".py")],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=SUITE_TIMEOUT)
         except subprocess.TimeoutExpired:
             detail[s] = 0
-            errors[s] = "超时（超过 120s 未结束）"
+            errors[s] = "超时（超过 %ds 未结束）" % SUITE_TIMEOUT
             continue
         out = p.stdout.decode("utf-8", "replace")
         # 退出码非 0 = 该套件自认失败；即使它打印了"全过"也不算通过

@@ -91,12 +91,25 @@ HIT_DECISIONS = frozenset({
     "stop_feedback_retry",
 })
 
+# 3.5.19 修补：本版新增的判定值必须有自己的分类。
+#   修前它们全部落到 unknown，统计输出会把它们报成「未知类型」——
+#   门自己记的事件在自己的统计工具里认不出来。
+#   旧日志没有这些值，分类保持向后兼容（不存在的类计数为 0）。
+WARN_DECISIONS = frozenset({"warn"})
+INACTIVE_DECISIONS = frozenset({"inactive"})
+
 
 def _decision_class(decision):
-    """block / review / unknown —— 不对未知类型猜测。"""
+    """block / warn / inactive / allow / review / unknown —— 不猜测。"""
     if isinstance(decision, str):
         if decision in HIT_DECISIONS:
             return "block"
+        if decision in WARN_DECISIONS:
+            return "warn"
+        if decision in INACTIVE_DECISIONS:
+            return "inactive"
+        if decision.startswith("allow_"):
+            return "allow"
         if decision.startswith("review_"):
             return "review"
     return "unknown"
@@ -127,7 +140,16 @@ def analyze(recs):
         "by_decision": collections.Counter(_decision_label(r.get("decision"))
                                            for r in recs),
         "by_day": collections.Counter((r.get("ts") or "")[:10] for r in recs),
+        "by_class": collections.Counter(
+            _decision_class(r.get("decision")) for r in recs),
     }
+    # 3.5.19 修补：事件条数 ≠ 调用次数。
+    #   同一次工具调用可能有多个门各记一条（例如 G5 deny + G6 提醒）；
+    #   能关联的只有 tool_use_id（PreToolUse 家族），Stop / UserPromptSubmit
+    #   没有这个字段，只能按 session+ts 近似。
+    a["linked_calls"] = len({r.get("tool_use_id") for r in recs
+                             if r.get("tool_use_id")})
+    a["events_without_id"] = sum(1 for r in recs if not r.get("tool_use_id"))
     # A. 同一 session 内同一规则重复触发 —— 只算门真实出手；
     #    REVIEW 评审与未知 decision 不进入（见 _decision_class）。
     unknown = collections.Counter()
@@ -366,6 +388,9 @@ def main():
             "path": path, "since": args.since, "total": a["total"],
             "by_gate": dict(a["by_gate"]), "by_rule": dict(a["by_rule"]),
             "by_decision": dict(a["by_decision"]), "by_day": dict(a["by_day"]),
+            "by_class": dict(a["by_class"]),
+            "linked_calls": a["linked_calls"],
+            "events_without_id": a["events_without_id"],
             "repeats": a["repeats"][:20], "retry": dict(a["retry"]),
             "unknown_decisions": dict(a.get("unknown_decisions") or {}),
         }
@@ -387,9 +412,19 @@ def main():
     print("  文件: %s" % path)
     if args.since:
         print("  范围: >= %s" % args.since)
-    print("  记录: %d 条" % a["total"])
+    print("  记录: %d 条（这是【已记录的判定数】，不是工具调用总数 ——"
+          " 纯放行不记事件）" % a["total"])
+    _cls = a.get("by_class") or {}
+    print("  按类别: %s" % " / ".join(
+        "%s=%d" % (k, _cls.get(k, 0))
+        for k in ("block", "warn", "inactive", "allow", "review", "unknown")))
+    print("  关联键: 带 tool_use_id（可关联一次调用）%d 条；"
+          "无 ID（Stop/UserPromptSubmit）%d 条"
+          % (a["linked_calls"], a["events_without_id"]))
     print("  重复触发口径：仅统计 deny / stop_feedback / stop_feedback_retry；"
           "REVIEW 评审调用不计入。")
+    print("  耗时口径：elapsed_ms 从 _lib 模块加载起算，不含解释器启动、"
+          "宿主排队/调度，也不覆盖被宿主超时杀死的调用。")
     unknown = a.get("unknown_decisions") or {}
     if unknown:
         print("  ⚠️ 未知 decision 类型（未计入重复触发）：%s" %

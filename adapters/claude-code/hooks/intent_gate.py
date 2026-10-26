@@ -29,10 +29,11 @@
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (  # noqa: E402
-    read_input, deny, allow, warn_inactive, state_path, load_state,
+    read_input, deny, allow, warn_inactive, warn_gate, state_path, load_state,
     load_state_strict,
     strip_referenced_text,
 )
@@ -209,25 +210,121 @@ def scan_prompt(prompt, prev=None):
 #      有值、注入卡片里明说本次没做语义评审 —— 用户看得见，不算"冒充"。
 #      直接不干预会让真实的「不要测试」在模型故障期间失效（漏拦）。
 
-def decide_intent(prompt, prev=None, review=None):
-    """把「上一轮状态 + 本轮用户原话 + 语义评审结论」融合成本轮意图状态。
+# ---------------------------------------------------------------- 约束结构（3.5.19）
+#
+# 审计案例 E：用户说「不运行会写数据的测试」，状态里却只剩
+#   intent_no_verify = True。
+# 后果有两层：
+#   ① 范围扩大 —— 代码对所有被识别为测试的命令套用该开关，
+#      「会写数据」这一条件在落状态时就丢了；
+#   ② 无法说明 —— 事后看不出这条禁令原本限定在什么范围，
+#      也说不清新授权替代掉了哪一条旧约束。
+#
+# 所以约束不能再压成一个布尔值。每个维度最多保留一条【当前生效】的
+# 结构化约束，至少带：原话 / 对象 / 条件 / 适用阶段 / 建立时间 / 来源。
+# 布尔字段保留为派生值 —— 它们是既有调用方（PreToolUse 拦截、注入卡片）
+# 的读接口，不是状态本身。
 
-    review 为 None 或 review["ok"] 为 False 时走词表回退路径。
+_CONSTRAINT_OBJECT = {
+    "ask": "向用户提问",
+    "verify": "运行测试 / 做验证",
+}
+
+
+def _new_constraint(kind, state, quote, condition, source):
+    """构造一条结构化约束。condition 为空 = 全面禁令（不是"条件未知"）。"""
+    return {
+        "state": state,
+        "quote": quote or None,
+        "object": _CONSTRAINT_OBJECT.get(kind, kind),
+        "condition": condition or None,
+        "phase": "本会话",
+        "since": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source": source,
+        "status": "active",
+    }
+
+
+def _superseded_record(con, reason):
+    """记录被替代的旧约束：保留原话与条件，不静默消失。
+
+    「新授权只替代对应旧约束」的可核查前提，是旧约束还看得见。
+    """
+    return {
+        "object": con.get("object"),
+        "quote": con.get("quote"),
+        "condition": con.get("condition"),
+        "since": con.get("since"),
+        "source": con.get("source"),
+        "cleared_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "cleared_reason": reason,
+    }
+
+
+def _prev_constraint(prev, kind):
+    """取上一轮该维度的生效约束。
+
+    ⚠️ 旧格式（只有 intent_no_ask / intent_no_verify）在这里按
+       【无条件禁令】读入 —— 旧状态没存条件，不能替它猜一个。
+       这会让升级后的第一轮仍按原来的严格程度执行，方向是保守的。
+    """
+    cons = prev.get("intent_constraints")
+    if isinstance(cons, dict):
+        con = cons.get(kind)
+        if isinstance(con, dict) and con.get("status") == "active" \
+                and con.get("state") == "forbid":
+            return con
+    flag = prev.get("intent_no_ask" if kind == "ask" else "intent_no_verify")
+    cond_flag = prev.get("intent_ask_conditional" if kind == "ask"
+                         else "intent_verify_conditional")
+    if flag or cond_flag:
+        return {
+            "state": "forbid",
+            "quote": prev.get("intent_ask_excerpt" if kind == "ask"
+                              else "intent_verify_excerpt"),
+            "object": _CONSTRAINT_OBJECT.get(kind, kind),
+            "condition": (prev.get("intent_ask_condition" if kind == "ask"
+                                   else "intent_verify_condition")
+                          if cond_flag else None) or None,
+            "phase": "本会话",
+            "since": None,
+            "source": prev.get("intent_source") or "unknown",
+            "status": "active",
+            "legacy": True,
+        }
+    return None
+
+
+def decide_intent(prompt, prev=None, review=None):
+    """把「上一轮约束 + 本轮用户原话 + 语义评审结论」融合成本轮意图状态。
+
+    review 为 None 或 review["ok"] 为 False 时走词表回退 / 保持路径。
 
     返回 dict（字段名与状态文件一致）：
-      intent_no_ask / intent_no_verify            —— 最终布尔状态
+      intent_no_ask / intent_no_verify            —— 是否有禁令（含条件禁令）
+      intent_ask_conditional / intent_verify_conditional
+                                                  —— 该禁令是否带用户给的限定条件
+      intent_ask_condition / intent_verify_condition
+                                                  —— 限定条件原话（无则 None）
       intent_ask_excerpt / intent_verify_excerpt  —— 用于拒绝提示的原话证据
-      intent_source     —— semantic / semantic+override / override / regex-fallback
-      intent_degraded   —— 非 None 时是回退原因（供注入卡片与事件如实展示）
+      intent_constraints   —— 结构化约束（原话 / 对象 / 条件 / 阶段 / 时间 / 来源）
+      intent_superseded    —— 上一条被替代的约束（含替代原因）
+      intent_unresolved    —— 本轮没能重新确认的既有约束（仅故障 / 过长时非空）
+      intent_source / intent_degraded             —— 判断方式与降级原因
+
+    ⚠️ 3.5.19：新表态替代【同一维度】的旧表态，不同维度互不替代 ——
+       「现在可以测了」不会顺带解除「别再问我」。这与修前的按维度
+       处理一致，本次只是让替代关系可见、让条件不再丢失。
     """
     prev = prev or {}
 
-    no_ask = bool(prev.get("intent_no_ask"))
-    no_verify = bool(prev.get("intent_no_verify"))
-    ask_frag = prev.get("intent_ask_excerpt")
-    verify_frag = prev.get("intent_verify_excerpt")
+    cons = {k: _prev_constraint(prev, k) for k in ("ask", "verify")}
+    superseded = prev.get("intent_superseded")
+    if not isinstance(superseded, dict):
+        superseded = {}
     source = "inherit"
     degraded = None
+    reevaluated = {"ask": False, "verify": False}
 
     # ---- 第 1 优先级：显式覆盖（不依赖模型，永远生效）----
     #
@@ -244,9 +341,17 @@ def decide_intent(prompt, prev=None, review=None):
     overrode_ask = bool(_asserted and OVERRIDE_ASK_RX.search(_asserted))
     overrode_verify = bool(_asserted and OVERRIDE_VERIFY_RX.search(_asserted))
     if overrode_ask:
-        no_ask, ask_frag = False, None
+        if cons["ask"]:
+            superseded["ask"] = _superseded_record(
+                cons["ask"], "用户写了 questions: on")
+        cons["ask"] = None
+        reevaluated["ask"] = True
     if overrode_verify:
-        no_verify, verify_frag = False, None
+        if cons["verify"]:
+            superseded["verify"] = _superseded_record(
+                cons["verify"], "用户写了 verify: on")
+        cons["verify"] = None
+        reevaluated["verify"] = True
     overrode = overrode_ask or overrode_verify
 
     # ---- 第 2 优先级：语义结论 ----
@@ -264,18 +369,23 @@ def decide_intent(prompt, prev=None, review=None):
                (kind == "verify" and overrode_verify):
                 continue                       # 显式覆盖优先，语义不得推翻
             state = d.get(kind) or "none"
+            reevaluated[kind] = True           # 模型看过本轮原话（none 也算）
             if state == "forbid":
-                if kind == "ask":
-                    no_ask = True
-                    ask_frag = d.get("ask_evidence") or _semantic_excerpt(prompt)
-                else:
-                    no_verify = True
-                    verify_frag = d.get("verify_evidence") or _semantic_excerpt(prompt)
+                # ⚠️ 条件随约束一起落盘：没有它，「会写数据的测试」
+                #    会被执行成「一切测试」（审计案例 E）。
+                cons[kind] = _new_constraint(
+                    kind, "forbid",
+                    d.get(kind + "_evidence")
+                    or _semantic_excerpt(prompt)
+                    or (cons[kind] or {}).get("quote"),
+                    d.get(kind + "_condition"),
+                    "semantic")
             elif state == "require":
-                if kind == "ask":
-                    no_ask, ask_frag = False, None
-                else:
-                    no_verify, verify_frag = False, None
+                if cons[kind]:
+                    superseded[kind] = _superseded_record(
+                        cons[kind],
+                        "语义评审判定用户已明确授权（require / %s）" % kind)
+                cons[kind] = None
             # none：保持上一轮，不动
         source = "semantic+override" if overrode else "semantic"
 
@@ -311,33 +421,97 @@ def decide_intent(prompt, prev=None, review=None):
                 #    `~~~\n不要测试\n~~~` 这类被引用的文本会被 Scan 成"用户禁令"
                 #    （U13：禁令建立侧未做引用剥离，与覆盖侧不对称；覆盖侧
                 #    早就在用 _asserted）。语义路径不受影响（它用 _asserted）。
-                kw_ask, kw_verify, kw_ask_frag, kw_verify_frag = scan_intent(_asserted, prev)
+                #
+                # ⚠️ 3.5.19 两处修正：
+                #    ① 判据改成【本轮词表是否真的命中】，不再用 scan_intent
+                #       的返回值 —— 那个值把【上一轮继承来的布尔】也算命中，
+                #       于是上一轮由语义建立的禁令会被标成「关键词匹配（降级）」，
+                #       判断方式被写错（与本项目最反对的混淆同类）。
+                #    ② 词表新增的禁令一律【无条件】：词表看不到「会写数据」
+                #       这类限定，替它补一个条件就是凭空的语义判断。
+                #       方向是保守的（宁可多拦），但卡片会如实标成全面禁令。
+                #    ③ 显式覆盖的维度【不再走词表】：同一句原话里既有
+                #       「不要再问我」又有「但 questions: on 这次例外」——
+                #       词表仍然会命中前半句，把覆盖刚解除的禁令又加回去，
+                #       等于覆盖写了不算数（回归用例「显式覆盖 questions: on
+                #       可放行 / verify: on 可放行」实测）。覆盖的优先级
+                #       高于词表（见第 1 优先级），这里必须让路。
+                hit_ask = (bool(_asserted and NO_ASK_RX.search(_asserted))
+                           and not overrode_ask)
+                hit_verify = (bool(_asserted and NO_VERIFY_RX.search(_asserted))
+                              and not overrode_verify)
+                if hit_ask:
+                    cons["ask"] = _new_constraint(
+                        "ask", "forbid",
+                        intent_excerpt(_asserted, NO_ASK_RX)
+                        or (cons["ask"] or {}).get("quote"),
+                        None, "regex-fallback")
+                    reevaluated["ask"] = True
+                if hit_verify:
+                    cons["verify"] = _new_constraint(
+                        "verify", "forbid",
+                        intent_excerpt(_asserted, NO_VERIFY_RX)
+                        or (cons["verify"] or {}).get("quote"),
+                        None, "regex-fallback")
+                    reevaluated["verify"] = True
                 # 词表只用于【设置】：不清除语义/上轮已建立的状态，避免
                 # 「关一次开关，禁令被静默解除」。清除只能来自语义 require 或显式覆盖。
-                if kw_ask:
-                    no_ask = True
-                    ask_frag = kw_ask_frag or ask_frag
-                if kw_verify:
-                    no_verify = True
-                    verify_frag = kw_verify_frag or verify_frag
-                source = "regex-fallback(disabled)" if (kw_ask or kw_verify) else "inherit"
+                source = ("regex-fallback(disabled)"
+                          if (hit_ask or hit_verify) else "inherit")
             else:
                 source = "inherit"
         else:
             # 调用故障 → 保留此前状态，不用词表新增任何禁令
             source = "hold-on-failure"
 
+    # ---- 本轮没能重新确认的既有约束 ----
+    #
+    # ⚠️ 只在【没能判断本轮原话】时产生（调用故障 / 原话过长）——
+    #    语义判成 none 不算：那次模型确实看过原话，只是用户没提这件事。
+    #    两者混在一起，就分不清「用户没说」和「我们没看到」（3.6.2 的要求），
+    #    也无法回答「故障期间这条带条件的旧约束还算不算数」。
+    unresolved = []
+    if source in ("hold-on-failure", "hold-too-long"):
+        for kind in ("ask", "verify"):
+            c = cons[kind]
+            if not c or reevaluated[kind]:
+                continue
+            cond = c.get("condition")
+            unresolved.append({
+                "object": c.get("object"),
+                "condition": cond,
+                "quote": c.get("quote"),
+                "why": ("本轮原话未做语义判断，该约束按上一轮原样生效"
+                        + ("；其中条件「%s」无法确认是否仍然适用" % cond
+                           if cond else "")),
+            })
+
+    no_ask = cons["ask"] is not None
+    no_verify = cons["verify"] is not None
+    ask_condition = (cons["ask"] or {}).get("condition")
+    verify_condition = (cons["verify"] or {}).get("condition")
+
     if overrode:
         if source.startswith("semantic"):
             source = "semantic+override"
-        elif source in ("inherit", "regex-fallback"):
+        # ⚠️ 3.5.19：修前这里写 `source in (..., "regex-fallback")`，
+        #    而实际值是 "regex-fallback(disabled)" —— 该分支永远不命中，
+        #    覆盖来源被标签吞掉。改成前缀匹配。
+        elif source.startswith("regex-fallback") or source == "inherit":
             source += "+override"
 
     return {
         "intent_no_ask": no_ask,
         "intent_no_verify": no_verify,
-        "intent_ask_excerpt": ask_frag,
-        "intent_verify_excerpt": verify_frag,
+        "intent_ask_conditional": bool(ask_condition),
+        "intent_verify_conditional": bool(verify_condition),
+        "intent_ask_condition": ask_condition,
+        "intent_verify_condition": verify_condition,
+        "intent_ask_excerpt": (cons["ask"] or {}).get("quote"),
+        "intent_verify_excerpt": (cons["verify"] or {}).get("quote"),
+        "intent_constraints": {"ask": cons["ask"], "verify": cons["verify"]},
+        "intent_superseded": {k: v for k, v in superseded.items() if v},
+        "intent_unresolved": unresolved,
         "intent_source": source,
         "intent_degraded": degraded,
     }
@@ -606,6 +780,34 @@ def is_test_command(cmd):
     return bool(TEST_CMD_RX.search(normalize_command(cmd)))
 
 
+# 带条件的禁测（如「不运行【会写数据的】测试」）只在条件成立时才算违规。
+# 条件是否成立需要语义理解，而 PreToolUse 不调用模型 —— 这里只做
+# 【静态字符串检查】，识别测试运行器里明确要求写入/更新快照的常见标志。
+#
+# ⚠️ 边界（必须如实声明）：这是标志检查，不是沙箱。
+#    没有这些标志的测试仍可能通过 fixture / conftest / 被测代码写数据，
+#    本门无法静态判断（同 policy 对 G5 的既有声明）。
+#    所以「没看到写标志」只能支撑一次带说明的放行，不能宣称「已确认只读」。
+_TEST_WRITE_RX = re.compile(
+    r"--(?:write|fix|overwrite|updateSnapshot|update[-_]snapshots?"
+    r"|snapshot[-_]update|inline[-_]snapshot)\b"
+    r"|--record-mode\s*[=\s]\s*rewrite\b",
+    re.I)
+
+
+def test_writes(cmd):
+    """测试命令里是否出现明确的写入/更新标志（不代表穷尽所有写数据方式）。"""
+    c = cmd or ""
+    if _TEST_WRITE_RX.search(c):
+        return True
+    # jest / vitest 的 `-u` = 更新快照。只在这两个运行器出现时才把 -u 当写入，
+    # 避免把其他命令里含义不同的 -u 误判成写操作。
+    if re.search(r"\b(jest|vitest)\b", c, re.I) and \
+            re.search(r"(?:^|\s)-u(?:\s|$)", c):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------- 来源引用
 
 # 状态里没有可追溯来源时（旧状态、或来源片段提取失败），
@@ -666,6 +868,12 @@ def main():
                       "状态文件存在但无法读取/解析，本轮【既有约束可能丢失】：%s" % sp)
     no_ask = bool(st.get("intent_no_ask"))
     no_verify = bool(st.get("intent_no_verify"))
+    # 3.5.19：禁令是否带用户给的限定条件。带条件时【不能】按全面禁令执行 ——
+    #   那是审计案例 E 的过度扩大（「不运行会写数据的测试」→「不许测试」）。
+    ask_cond = bool(st.get("intent_ask_conditional"))
+    verify_cond = bool(st.get("intent_verify_conditional"))
+    ask_condition = st.get("intent_ask_condition")
+    verify_condition = st.get("intent_verify_condition")
     # 3.5.17：提示必须引用【本会话】的真实来源，不能写死历史原话。
     ask_frag = st.get("intent_ask_excerpt")
     verify_frag = st.get("intent_verify_excerpt")
@@ -678,41 +886,101 @@ def main():
         first = ""
         if qs and isinstance(qs, list) and isinstance(qs[0], dict):
             first = (qs[0].get("question") or "")[:80]
-        deny(
-            "【G7 意图门】你本会话已经承诺过不再提问，但现在要调 AskUserQuestion。\n"
-            "  想问：%s\n"
-            "\n"
-            "%s"
-            "\n"
-            "  请按用户已给出的信息自行决定并执行。\n"
-            "  确实无法决定时，把选项和推荐写进正文，让用户回复一句话即可 ——\n"
-            "  这比弹一个必须点选的框更轻。\n"
-            "\n"
-            "  如果用户刚刚明确授权你询问，让他写 `questions: on`。"
-            % (first or "(未提供问题文本)",
-               _source_line(ask_frag, "不要再问", intent_source)),
-            gate_id="G7", rule_id="questions_disabled",
-            tool=tool, session_id=data.get("session_id"),
-        )
+        if ask_cond:
+            # 带条件的禁问：条件是否成立取决于问题内容，需要语义理解，
+            # 而 PreToolUse 不调用模型 —— 硬拦会把「别问实现细节」变成
+            # 「别问任何问题」，正是审计案例 E 的过度扩大。只提示，不拦。
+            # 3.5.19：带条件禁令的「没拦」也是一个需要可统计的结果 ——
+            # 否则事后无法区分「门没运行」和「门评估后选择不拦」。
+            warn_gate(
+                "G7", "questions_conditional",
+                "【G7 意图门】用户本会话的限制带条件（对象：向你提问）。\n"
+                "  条件：%s\n"
+                "%s"
+                "  本次要问：%s\n"
+                "  ⚠️ 本门【没有对条件做语义判断】：工具调用前不调用模型，\n"
+                "     无法判断这次提问是否落在条件内，因此【没有拦截】。\n"
+                "     这不是「条件已满足」，只是「本门判断不了」。\n"
+                "  请自行确认这次提问不落在该条件内。\n"
+                % (ask_condition or "(未给出)",
+                   _source_line(ask_frag, "不要再问", intent_source),
+                   first or "(未提供问题文本)"),
+                tool=tool, session_id=data.get("session_id"),
+                extra={"condition": ask_condition or "",
+                       "condition_evaluated": False})
+        else:
+            deny(
+                "【G7 意图门】你本会话已经承诺过不再提问，但现在要调 AskUserQuestion。\n"
+                "  想问：%s\n"
+                "\n"
+                "%s"
+                "\n"
+                "  请按用户已给出的信息自行决定并执行。\n"
+                "  确实无法决定时，把选项和推荐写进正文，让用户回复一句话即可 ——\n"
+                "  这比弹一个必须点选的框更轻。\n"
+                "\n"
+                "  如果用户刚刚明确授权你询问，让他写 `questions: on`。"
+                % (first or "(未提供问题文本)",
+                   _source_line(ask_frag, "不要再问", intent_source)),
+                gate_id="G7", rule_id="questions_disabled",
+                tool=tool, session_id=data.get("session_id"),
+            )
 
     # ---- P2-3：拦测试 ----
     if tool == "Bash" and no_verify:
         cmd = ti.get("command") or ""
         if is_test_command(cmd):
-            deny(
-                "【G7 意图门】用户在本会话说过不需要测试，但你正在跑测试。\n"
-                "  命令：%s\n"
-                "\n"
-                "%s"
-                "\n"
-                "  用户已经豁免了这个维度。请直接交付结果。\n"
-                "  如果确实需要验证，先说明「为什么这次必须验证」，\n"
-                "  由用户写 `verify: on` 放行。"
-                % (cmd[:150],
-                   _source_line(verify_frag, "不需要测试", intent_source)),
-                gate_id="G7", rule_id="verification_disabled",
-                tool=tool, session_id=data.get("session_id"),
-            )
+            if verify_cond:
+                # 带条件的禁测：只在【静态可见的写入标志】出现时才拦。
+                if test_writes(cmd):
+                    deny(
+                        "【G7 意图门】用户本会话的禁测是【带条件】的。\n"
+                        "  条件：%s\n"
+                        "%s"
+                        "  命令：%s\n"
+                        "  该命令带明确的写入/更新标志，判定落在上述条件内。\n"
+                        "\n"
+                        "  请改用只读方式验证（不写快照、不改文件、不写数据）。\n"
+                        "  如果用户现在允许了，让他写 `verify: on`。"
+                        % (verify_condition or "(未给出)",
+                           _source_line(verify_frag, "不需要测试", intent_source),
+                           cmd[:150]),
+                        gate_id="G7", rule_id="verification_disabled_conditional",
+                        tool=tool, session_id=data.get("session_id"),
+                    )
+                # 没有可见写入标志 → 不硬拦，只提示。
+                # 边界：静态检查看不到 fixture / conftest / 被测代码是否写数据。
+                warn_gate(
+                    "G7", "verification_conditional_allowed",
+                    "【G7 意图门】用户本会话的禁测是【带条件】的。\n"
+                    "  条件：%s\n"
+                    "%s"
+                    "  命令：%s\n"
+                    "  本次是测试命令，但没有检测到明确的写入标志，因此【没有拦截】。\n"
+                    "  ⚠️ 条件只做了【静态近似】：看到 --write / --fix / -u 这类标志才拦；\n"
+                    "     fixture / conftest / 被测代码是否写数据，本门看不到。\n"
+                    "     所以这不是「条件不成立」，而是「本门只能确认到这一步」。\n"
+                    % (verify_condition or "(未给出)",
+                       _source_line(verify_frag, "不需要测试", intent_source),
+                       cmd[:150]),
+                    tool=tool, session_id=data.get("session_id"),
+                    extra={"condition": verify_condition or "",
+                           "condition_evaluated": "static-write-flag-only"})
+            else:
+                deny(
+                    "【G7 意图门】用户在本会话说过不需要测试，但你正在跑测试。\n"
+                    "  命令：%s\n"
+                    "\n"
+                    "%s"
+                    "\n"
+                    "  用户已经豁免了这个维度。请直接交付结果。\n"
+                    "  如果确实需要验证，先说明「为什么这次必须验证」，\n"
+                    "  由用户写 `verify: on` 放行。"
+                    % (cmd[:150],
+                       _source_line(verify_frag, "不需要测试", intent_source)),
+                    gate_id="G7", rule_id="verification_disabled",
+                    tool=tool, session_id=data.get("session_id"),
+                )
 
     allow()
 
@@ -724,4 +992,4 @@ if __name__ == "__main__":
         raise
     except Exception as e:
         warn_inactive("G7 意图门", "脚本异常，本次放行：%r" % (e,))
-        sys.exit(0)
+        allow()   # 与正常放行同路，让待发提醒有机会输出

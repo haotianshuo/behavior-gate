@@ -6,9 +6,9 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#运行要求)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> 当前版本：**V3.5.18** ｜ 2026-10-07
+> 当前版本：**V3.5.19** ｜ 2026-10-26
 
-[下载发行包](https://github.com/haotianshuo/behavior-gate/releases/latest) · [快速开始](#快速开始) · [安装与升级](install.md) · [本版更新](docs/releases/v3.5.18.md) · [参与贡献](CONTRIBUTING.md)
+[下载发行包](https://github.com/haotianshuo/behavior-gate/releases/latest) · [快速开始](#快速开始) · [安装与升级](install.md) · [本版更新](docs/releases/v3.5.19.md) · [参与贡献](CONTRIBUTING.md)
 
 ## 为什么使用 BehaviorGate
 
@@ -55,7 +55,7 @@ G1、G5 等执行检查主要使用本地规则。G3、G7 的部分自然语言�
 
 ### 1. 下载并解压
 
-从 [GitHub Releases](https://github.com/haotianshuo/behavior-gate/releases/latest) 下载 `behavior-gate-V3.5.18.zip`，解压后进入包含 `install.py` 的目录。
+从 [GitHub Releases](https://github.com/haotianshuo/behavior-gate/releases/latest) 下载 `behavior-gate-V3.5.19.zip`，解压后进入包含 `install.py` 的目录。
 
 发行包同时提供 `SHA256SUMS.txt`；校验和用于发现下载损坏，不是独立的供应链签名。
 
@@ -307,7 +307,7 @@ python tools/preflight_release.py
 |---|---|
 | [安装与升级](install.md) | 作用域、配置保留、校验、备份及人工恢复 |
 | [新电脑安装说明](安装说明.md) | 在另一台电脑下载发行包后开始使用 |
-| [v3.5.18 发行说明](docs/releases/v3.5.18.md) | 本版变化、升级提醒与已知限制 |
+| [v3.5.19 发行说明](docs/releases/v3.5.19.md) | 本版变化、升级提醒与已知限制 |
 | [完整变更记录](CHANGELOG.md) | 历史问题、修复和未解决项 |
 | [贡献指南](CONTRIBUTING.md) | 开发规则、回归测试与提交流程 |
 | [安全说明](SECURITY.md) | 威胁模型与私下报告渠道 |

@@ -133,8 +133,15 @@ def main():
         intent_state = {
             "intent_no_ask": bool(prev.get("intent_no_ask")),
             "intent_no_verify": bool(prev.get("intent_no_verify")),
+            "intent_ask_conditional": bool(prev.get("intent_ask_conditional")),
+            "intent_verify_conditional": bool(prev.get("intent_verify_conditional")),
+            "intent_ask_condition": prev.get("intent_ask_condition"),
+            "intent_verify_condition": prev.get("intent_verify_condition"),
             "intent_ask_excerpt": prev.get("intent_ask_excerpt"),
             "intent_verify_excerpt": prev.get("intent_verify_excerpt"),
+            "intent_constraints": prev.get("intent_constraints"),
+            "intent_superseded": prev.get("intent_superseded"),
+            "intent_unresolved": prev.get("intent_unresolved"),
             "intent_source": "decision-failed",
             "intent_degraded": "决策层异常，保持上一轮状态",
         }
@@ -178,6 +185,18 @@ def main():
         st["source"] = source
         st["intent_no_ask"] = no_ask
         st["intent_no_verify"] = no_verify
+        # 3.5.19（审计案例 E）：条件与结构化约束必须一起落盘。
+        # 只存布尔值会把「不运行会写数据的测试」压成「禁止一切测试」，
+        # 事后也无法说明禁令原本限定在什么范围、被哪条新授权替代过。
+        st["intent_ask_conditional"] = bool(
+            intent_state.get("intent_ask_conditional"))
+        st["intent_verify_conditional"] = bool(
+            intent_state.get("intent_verify_conditional"))
+        st["intent_ask_condition"] = intent_state.get("intent_ask_condition")
+        st["intent_verify_condition"] = intent_state.get("intent_verify_condition")
+        st["intent_constraints"] = intent_state.get("intent_constraints")
+        st["intent_superseded"] = intent_state.get("intent_superseded")
+        st["intent_unresolved"] = intent_state.get("intent_unresolved")
         st["intent_ask_excerpt"] = ask_frag
         st["intent_verify_excerpt"] = verify_frag
         # 本次意图是怎么来的（semantic / regex-fallback / override …）
@@ -225,12 +244,30 @@ def main():
     #   2) 语义评审降级成了关键词匹配（用户必须能发现"这次没用上理解能力"）
     intent_lines = []
     _forbids = []
-    if no_verify:
-        _forbids.append("不要运行测试" + ("（依据原话「%s」）" % verify_frag
-                                          if verify_frag else "（无来源片段）"))
-    if no_ask:
-        _forbids.append("不要向你提问" + ("（依据原话「%s」）" % ask_frag
-                                          if ask_frag else "（无来源片段）"))
+    # 3.5.19（审计案例 E）：卡片必须显示禁令的【实际范围】。
+    # 修前无论用户说的是「不要测试」还是「不运行会写数据的测试」，
+    # 卡片都显示同一句「不要运行测试」—— 条件在显示层也丢了。
+    _cons = intent_state.get("intent_constraints")
+    if not isinstance(_cons, dict):
+        _cons = {}
+    for _kind, _label, _frag in (("verify", "不要运行测试", verify_frag),
+                                 ("ask", "不要向你提问", ask_frag)):
+        _c = _cons.get(_kind)
+        if not isinstance(_c, dict) or _c.get("state") != "forbid":
+            # 旧状态 / 决策层故障：退回布尔 + 片段，严格程度不变
+            if not (no_verify if _kind == "verify" else no_ask):
+                continue
+            _c = {"quote": _frag, "condition": None}
+        _cond = _c.get("condition")
+        _quote = _c.get("quote")
+        _desc = _label
+        if _cond:
+            _desc += "（仅限「%s」，不是全面禁令）" % _cond
+        if _quote:
+            _desc += "，依据原话「%s」" % _quote
+        else:
+            _desc += "（无来源片段）"
+        _forbids.append(_desc)
     if _forbids:
         # ⚠️ 审计修复（2026-09-30）：直接使用本函数已有的写入结果 saved ——
         #    修前无论写入成败都宣称"已记录"，而同一轮 stderr 却报
@@ -244,6 +281,14 @@ def main():
                 "  ⚠️ 本会话要求【未能保存】（%s）——"
                 "后续工具检查可能无法执行该要求：%s"
                 % (_res, "；".join(_forbids)))
+    # ⚠️ 3.5.19（审计案例 E）：故障轮要说清【哪条旧约束没被重新确认】。
+    #    修前只说「已保留既有约束」—— 用户看不出保留的是全面禁令
+    #    还是一条带条件的局部禁令，也就无法判断它是否已经不适用。
+    for _u in (intent_state.get("intent_unresolved") or [])[:4]:
+        if isinstance(_u, dict):
+            intent_lines.append(
+                "  · 未重新确认：%s —— %s"
+                % (_u.get("object") or "约束", _u.get("why") or "原因未记录"))
     # ⚠️ 「关闭」与「故障」分开说 —— 用户要能分清"我关的"和"它坏了"。
     _src = str(intent_state.get("intent_source") or "")
     if intent_state.get("intent_degraded"):
@@ -285,10 +330,22 @@ def main():
     #   · 真正由程序实际检查的只有四样，已在卡片最后一行如实列出。
     #   · 绝不可写成"程序保证理解自然语言" —— 做不到，这就是过度承诺。
     #
-    # 关闭方式：策略里把 protocol_card.enabled 设为 false。
+    # 开关：policy.protocol_card.enabled（3.5.19 起默认 false；
+    #       老配置里写了 true 的仍会注习惯卡片）。
     # （该键【确实被本处读取】—— 不是只声明不执行的空开关。）
+    #
+    # ⚠️ 3.5.19（修正方案第 7 项）：编程习惯部分【默认不再注入】。
+    #
+    #    审计结论：「当前每轮注入任务合同、固定验证流程、收尾三报」——
+    #    这些是编程习惯建议，和四道门检查的东西不是一回事。默认把它们
+    #    塞进每一次提交，等于让门替用户规定工作方式，而程序既不检查、
+    #    也无法检查是否被遵守。门该做的是边界说明，不是习惯说教。
+    #
+    #    现在：习惯卡片默认关闭（policy.protocol_card.enabled = false），
+    #    需要的人可自行打开；边界说明行始终保留 —— 它只有一句，
+    #    且是【对程序真实能力的事实陈述】，不是行为要求。
     proto = policy.get("protocol_card") or {}
-    if proto.get("enabled", True):
+    if proto.get("enabled", False):
         lines += [
             "",
             "[行为门 · 工作协议（模型指导；程序不检查是否遵守）]",
@@ -304,8 +361,15 @@ def main():
             "  逐项闭环：先验证存在 → 最小改动 → 用同一路径复验；复现不出记 NOT_REPRODUCED（≠不存在）",
             "  已证实 / 推断 / 待验证 分开写；推断不得写成事实（拿不准就标 NOT_MEASURED）",
             "  收尾三报分开：协议执行 / 机械检查 / 未测量项（一律写 NOT_MEASURED）",
-            "  ⚠️ 程序实际检查的只有：预算(G1) · 证据块与级别(G3) · 危险命令(G5) · 意图(G7)",
         ]
+
+    # 边界说明（始终保留）。这是事实陈述，不是行为要求 ——
+    # 它告诉用户和模型：哪些是真会拦的，哪些只是建议。
+    if proto.get("boundary_line", True):
+        lines += ["",
+                  "[行为门 · 检查范围] 程序实际检查的只有："
+                  "预算(G1) · 证据块与级别(G3) · 危险命令(G5) · 意图(G7)。"
+                  "其余工作习惯不检查、也不保证。"]
 
     emit_text("\n".join(lines))
     allow()

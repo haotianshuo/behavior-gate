@@ -207,10 +207,13 @@ def main():
 
     verdict, used, cap = res
 
-    if not seed:
-        warn_inactive("G1 预算门",
-                      "未找到 UserPromptSubmit 写入的会话预算，已按策略默认值执行。"
-                      "如需按任务定制，请确认 inject_budget.py 已注册。")
+    # ⚠️ 3.5.19：「没有会话预算」的 inactive 事件只在【放行】时记。
+    #    修前（同版本内）这句写在判定之前 → 一次拒绝会产生
+    #    deny + inactive 两条事件，与「一次判定只记一次」的观测不变量冲突，
+    #    也让统计里「拒绝次数」被 inactive 稀释。
+    #    语义上也更准确：按默认值【拒绝】时门是生效的，不是 inactive；
+    #    只有按默认值【放行】才是「本轮这道门没有实际约束」。
+    #    （拒绝文案里已经写明「这是默认值 / 你从未授权过」，信息不丢失。）
 
     if verdict == "DENY_FORBIDDEN_BY_TASK":
         # ⚠️ 3.5.14：按 state 里的 `source` 分流首句（外部复核 + 本机实测）。
@@ -315,6 +318,11 @@ def main():
             tool="Agent", session_id=data.get("session_id"),
         )
 
+    if not seed:
+        warn_inactive("G1 预算门",
+                      "未找到 UserPromptSubmit 写入的会话预算，已按策略默认值执行。"
+                      "如需按任务定制，请确认 inject_budget.py 已注册。")
+
     allow()
 
 
@@ -325,4 +333,4 @@ if __name__ == "__main__":
         raise
     except Exception as e:
         warn_inactive("G1 预算门", "脚本异常，本次放行：%r" % (e,))
-        sys.exit(0)
+        allow()   # 与正常放行同路，让待发提醒有机会输出

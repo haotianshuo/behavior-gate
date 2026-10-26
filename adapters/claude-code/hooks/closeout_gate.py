@@ -30,6 +30,7 @@ V2 改成：宿主侧【自动采集】。
   - 不解析进程树（尽力而为地记录，不做判断）
 """
 
+import hashlib
 import os
 import re
 import sys
@@ -38,7 +39,20 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (  # noqa: E402
     read_input, allow, state_path, locked_update, load_policy, load_state,
+    warn_gate, warn_inactive,
 )
+
+
+def _cmd_key(cmd):
+    """完整命令的判重键：规范空白后的 SHA-256 前 16 位 + 显示前缀。
+
+    3.5.19：修前用 `cmd.strip()[:200]` 判重，把共享同一段开头、
+    但全文不同的命令合并成\"同一条命令\"，产生错误的重复提醒
+    （审计案例 D：5 条不同查询被前 200 字符合并）。判重必须基于完整命令；
+    前缀只用于展示，不参与比较。
+    """
+    norm = re.sub(r"\s+", " ", (cmd or "").strip())
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16] + "|" + norm[:120]
 
 
 def _record(st, session_id, tool, ti, agent_id):
@@ -83,17 +97,20 @@ def _record(st, session_id, tool, ti, agent_id):
 
     elif tool == "Bash":
         cmd = (ti.get("command") or "")
-        # 计数（只记录，不拦截）
-        norm = re.sub(r"\s+", " ", cmd.strip())[:200]
-        st["bash_cmds"].append(norm)
-        if st["bash_cmds"].count(norm) == 3:
-            # 同一条命令第 3 次 = G4 循环门的可执行代理指标
-            st["repeat_suspects"].append({"cmd": norm,
+        norm_full = re.sub(r"\s+", " ", cmd.strip())
+        # 计数（只记录，不拦截）。判重键 = 完整命令摘要（见 _cmd_key）。
+        key = _cmd_key(cmd)
+        st["bash_cmds"].append(key)
+        if st["bash_cmds"].count(key) == 3:
+            # 同一条命令第 3 次 = G4 循环门的可执行代理指标。
+            # 显示用前缀，判重用 key —— 两者分开，避免再次把不同命令合并。
+            st["repeat_suspects"].append({"cmd": norm_full[:200],
+                                          "key": key,
                                           "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
         if ti.get("run_in_background") or "--bg" in cmd or "start-bg" in cmd:
             st["background_cmds"].append({
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "cmd": norm,
+                "cmd": norm_full[:200],
                 "agent_id": agent_id,
             })
 
@@ -169,16 +186,23 @@ def main():
             #    那条，判据恒真 → 每次都提示（实测：同一条命令 8 次 → 提醒 6 次，
             #    文案恒称"已出现 3 次"——第 8 次时这句话是假的）。
             #    修法：加上"本次计数恰好为 3"——即这一条确实刚被写入。
-            _cur = re.sub(r"\s+", " ", (ti.get("command") or "").strip())[:200]
-            if last.get("ts") and last.get("cmd") == _cur and \
-                    (st.get("bash_cmds") or []).count(_cur) == 3:
-                sys.stderr.write(
+            # 3.5.19：用完整命令摘要比较（旧状态条目没有 key → 自动跳过提示，
+            # 不产生误报）。显示仍用前缀，见 _cmd_key 的说明。
+            _cur_key = _cmd_key(ti.get("command") or "")
+            if last.get("key") == _cur_key and \
+                    (st.get("bash_cmds") or []).count(_cur_key) == 3:
+                # 3.5.19：提示必须同时落事件。修前只写 stderr，
+                # 事后统计只能看到 Bash 调用，看不到这条提醒发生过。
+                warn_gate(
+                    "G6", "repeat_command",
                     "【重复提醒】本次会话里这条命令已出现 3 次：\n"
                     "  %s\n"
-                    "  这不是拦截。如果是在轮询等待，忽略即可；\n"
+                    "  这不是拦截。判重基于完整命令，不会把开头相同、\n"
+                    "  参数不同的不同命令合并成一条。\n"
+                    "  如果是在轮询等待，忽略即可；\n"
                     "  如果是在反复重试同一个失败操作，建议先确认失败原因再继续。\n"
-                    % last["cmd"][:120])
-                sys.stderr.flush()
+                    % last["cmd"][:120],
+                    tool=tool, session_id=session_id)
 
         # 用量警告
         budget = policy.get("budget") or {}
@@ -187,13 +211,15 @@ def main():
             used = len(st.get("bash_cmds") or [])
             # 只在【恰好越过】阈值时提醒一次，避免每次调用都刷屏
             if used == int(warn_at):
-                sys.stderr.write(
+                warn_gate(
+                    "G6", "bash_usage_warn",
                     "【用量提醒】本次会话 Bash 调用已达 %d 次。\n"
                     "  这不是拦截，只是一次可见性提示。\n"
                     "  若这是正常的深度调研，忽略即可；\n"
                     "  若你在反复重试同类命令，考虑先确认方向再继续。\n"
-                    % used)
-                sys.stderr.flush()
+                    % used,
+                    tool=tool, session_id=session_id,
+                    extra={"used": used, "warn_at": int(warn_at)})
 
     elif tool == "WebFetch":
         budget = policy.get("budget") or {}
@@ -202,10 +228,12 @@ def main():
             st = load_state(path) or {}
             used = int(st.get("webfetch_count") or 0)
             if used == int(warn_at):
-                sys.stderr.write(
+                warn_gate(
+                    "G6", "webfetch_usage_warn",
                     "【用量提醒】本次会话 WebFetch 调用已达 %d 次。\n"
-                    "  这不是拦截，只是一次可见性提示。\n" % used)
-                sys.stderr.flush()
+                    "  这不是拦截，只是一次可见性提示。\n" % used,
+                    tool=tool, session_id=session_id,
+                    extra={"used": used, "warn_at": int(warn_at)})
 
     allow()
 
@@ -225,4 +253,7 @@ if __name__ == "__main__":
             sys.stderr.flush()
         except Exception:
             pass
-        sys.exit(0)   # 纯旁路，绝不影响主流程
+        # 3.5.19 修补：改用 warn_inactive —— 它会额外记一条 inactive 事件
+        # 并通过 systemMessage 送达用户（stderr 在 exit 0 下谁也看不到）。
+        warn_inactive("G6 收尾门", "脚本异常，本次旁路跳过：%r" % (e,))
+        allow()   # 纯旁路，绝不影响主流程

@@ -353,9 +353,19 @@ _INTENT_PROMPT = (
     "如果原话带「…（此处省略 N 字…）…」标注，说明你看到的是节选：\n"
     "  若你的判断依赖被省略的内容，把 uncertain 设为 true。\n"
     "\n"
+    "⚠️ 条件（*_condition）：禁令【不是全面】的时候，把用户给出的限定\n"
+    "  原样抄进对应字段。例：\n"
+    "    「不运行会写数据的测试」→ verify=forbid, verify_condition=\"会写数据的\"\n"
+    "    「别问实现细节的问题」  → ask=forbid,    ask_condition=\"实现细节\"\n"
+    "  若禁令是全面的（「不要测试」「别再问我」），condition 必须是空字符串。\n"
+    "  不要拿语气词、时间词（先/暂时/这轮）、泛化对象硬凑条件 ——\n"
+    "  分不清就留空（留空更保守：按全面禁令处理）。\n"
+    "\n"
     "只输出一行 JSON，不要解释、不要换行：\n"
     "{\"ask\": \"forbid/require/none\", \"ask_evidence\": \"原话里对应片段，没有就空字符串\", "
+    "\"ask_condition\": \"限定条件原话，没有就空字符串\", "
     "\"verify\": \"forbid/require/none\", \"verify_evidence\": \"原话里对应片段，没有就空字符串\", "
+    "\"verify_condition\": \"限定条件原话，没有就空字符串\", "
     "\"uncertain\": true 或 false, \"reason\": \"不超过30字的理由\"}"
 )
 
@@ -377,8 +387,21 @@ _CLAIM_PROMPT = (
     "  而完成词【独立成句】或【后接目标宾语】\n"
     "  （「已完成」「已修复。」「已完成部署」）→ 是谓语、是在宣布 → 判 (A)。\n"
     "  分不出来的，按 (A) 判（宁可多拦）。\n"
+    "\n"
+    "⚠️ 历史引用（3.5.19 审计案例 B；实测样本：「10/25 23:16 的……是已有\n"
+    "  合法修复，RESULTS 已记录其定向验证通过。必须保留，不要回退。」）：\n"
+    "  若片段指向【更早的事】——带日期/时间、或明说「已有」「上一轮」\n"
+    "  「此前」「上次」「原报告」——并且说话人是在【确认已有结果仍然有效】，\n"
+    "  不是在宣布【本回合刚做成】→ 判 (B)，attribution 填 historical_reference。\n"
+    "  若它确实在宣布本轮成果 → (A)，attribution 填 current_claim。\n"
+    "  拿不准时 real_claim 按 (A) 判，但 attribution 填 uncertain ——\n"
+    "  调用方会据此把它当作「归属不确定」，先提示而不直接指控。\n"
+    "\n"
     "只输出一行 JSON，不要解释、不要换行：\n"
-    "{\"real_claim\": true 或 false, \"reason\": \"不超过30字的理由\"}"
+    "{\"real_claim\": true 或 false, "
+    "\"attribution\": \"current_claim / historical_reference / quoted_or_mentioned / uncertain\", "
+    "\"object\": \"被宣布完成的对象，没有就空字符串\", "
+    "\"reason\": \"不超过30字的理由\"}"
 )
 
 
@@ -395,6 +418,9 @@ _CLAIMS_PROMPT = (
     "  - 引用、举例、测试用例名、反例名（如表格里列出的用例标题）\n"
     "  - 假设、待办、否定（如「尚未完成」「还没做」）\n"
     "  - 用户说过的话、别人说的话\n"
+    "  - 对【更早结果】的确认（带日期、「已有」「上一轮」「此前」「上次」\n"
+    "    「原报告」等），即使里面含「验证通过」「已修复」——那是历史引用\n"
+    "    （3.5.19 审计案例 B），不是本轮成果\n"
     "  - 只在描述别的东西时顺带出现的完成词\n"
     # ⚠️ 审计修复（2026-09-29，V2）：补【过程动作 vs 目标达成】的区分。
     #    实测误拦（本会话真实发生，已最小化复现）：助手汇报进度
@@ -594,7 +620,12 @@ def _as_state(v):
 def review_intent(prompt, policy=None, session_id=None):
     """G7：理解用户原话对「提问」「测试」两件事的意图（三态）。
 
-    返回 dict：ok / verdict / detail{ask, verify, *_evidence} / reason / meta
+    返回 dict：ok / verdict / detail{ask, verify, *_evidence, *_condition} / reason / meta
+
+    detail 里的 ask_condition / verify_condition：
+      用户给出的限定条件原话；空字符串 = 全面禁令（不是"没有条件信息"）。
+      ⚠️ 调用方必须把它随约束一起保存 —— 只留布尔值会让局部禁令
+         扩大成全面禁令（审计案例 E）。
 
     detail 里的 ask / verify 取值：
       "forbid"  = 用户明确要求不要做 → 调用方应【设置】该禁令
@@ -636,11 +667,17 @@ def review_intent(prompt, policy=None, session_id=None):
             #    一律降为 none（保持现状），并在 detail 里标明原因。
             ask = verify = "none"
 
+        # 3.5.19（审计案例 E）：条件必须随判断一起带出。
+        #   修前 detail 只有三态和证据片段，「不运行会写数据的测试」里的
+        #   「会写数据的」在落状态前就丢了 —— 于是局部禁令被当成全面禁令。
+        #   模型没给就留空字符串（= 全面禁令，保守方向），绝不猜。
         detail = {
             "ask": ask,
             "verify": verify,
             "ask_evidence": _clip(obj.get("ask_evidence"), 60),
             "verify_evidence": _clip(obj.get("verify_evidence"), 60),
+            "ask_condition": _clip(obj.get("ask_condition"), 40),
+            "verify_condition": _clip(obj.get("verify_condition"), 40),
             "uncertain": uncertain,
         }
         verdict = VERDICT_BLOCK if "forbid" in (ask, verify) else VERDICT_ALLOW
@@ -694,7 +731,18 @@ def review_claim(fragment, context, policy=None, session_id=None, timeout_s=None
         real = _as_bool(obj.get("real_claim"))
         if real is None:
             raise ValueError("real_claim 不是布尔值")
-        return (VERDICT_BLOCK if real else VERDICT_ALLOW), {"real_claim": real}
+        # 3.5.19（审计案例 B）：归属与对象随结论一起返回。
+        #   attribution 只用于【提示与统计】，不覆盖 real_claim ——
+        #   两者冲突时以结论为准，避免模型自相矛盾变成放行通道。
+        attribution = str(obj.get("attribution") or "").strip().lower()
+        if attribution not in ("current_claim", "historical_reference",
+                               "quoted_or_mentioned", "uncertain"):
+            attribution = ""
+        return (VERDICT_BLOCK if real else VERDICT_ALLOW), {
+            "real_claim": real,
+            "attribution": attribution,
+            "object": _clip(obj.get("object"), 60),
+        }
 
     return _call_and_parse(policy, _CLAIM_PROMPT % (_clip(frag, 400), _clip(context, 600)),
                            parse, session_id, "claim", timeout_s)

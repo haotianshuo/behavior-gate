@@ -32,6 +32,13 @@ import time as _time
 import shutil as _shutil
 import tempfile
 
+# 本 hook 进程的启动时刻。事件里带 elapsed_ms，用来回答
+# 「这次判断花了多久」—— 3.5.19 之前事件没有耗时段，
+# 只能从宿主回执里反推，而回执往往已被超时取消。
+# ⚠️ 边界：它只覆盖【本进程内】的时间，不含宿主排队与调度，
+#    更不能代替宿主侧的 timedOut 记录（进程被杀时本函数不会执行）。
+_PROCESS_T0 = _time.monotonic()
+
 
 # ---------------------------------------------------------------- 控制台编码
 #
@@ -63,13 +70,106 @@ _force_utf8_console()
 
 # ---------------------------------------------------------------- 基础 IO
 
+# 本次 hook 调用的宿主上下文。只保留【关联键】，不保留 tool_input ——
+# 事件里绝不能落命令、正文或 MCP payload。
+# 3.5.19（审计修正项 1）：没有关联键时，「同一次工具调用被几道门看过、
+# 各自结果如何」无法拼起来，只能按时间顺序猜。
+_INPUT_META = {}
+
+# 一个 hook 进程只能输出一个 JSON 对象（见 emit_json 的说明）。
+_EMITTED = {"done": False}
+
+# 待发送的非阻断提醒。由 emit_context() 累积、在 allow()/deny() 退出前
+# 合并进唯一的那个 JSON 对象 —— 这样「先说一句、再放行」不会产生两个对象。
+#   model: 进 hookSpecificOutput.additionalContext（模型可见）
+#   user : 进顶层 systemMessage（用户可见）
+_PENDING = {"model": [], "user": []}
+
+
+def _pending_payload(hook_event, extra_hso=None):
+    """把待发提醒拼成宿主 JSON 片段。没有待发内容时返回 None。"""
+    hso = dict(extra_hso or {})
+    if _PENDING["model"]:
+        hso["additionalContext"] = "\n".join(_PENDING["model"])
+    obj = {}
+    if hso:
+        obj["hookSpecificOutput"] = hso
+    if _PENDING["user"]:
+        obj["systemMessage"] = "\n".join(_PENDING["user"])
+    return obj or None
+
+
+def emit_context(text, deliver="model"):
+    """登记一条【非阻断】提醒，等 allow()/deny() 退出时随 JSON 发出。
+
+    ⚠️ 送达口径（本机 Claude Code 2.1.152，官方文档）：
+      · PreToolUse 支持 hookSpecificOutput.additionalContext —— 模型可见；
+      · Stop 支持 hookSpecificOutput.additionalContext —— 会【继续对话】，
+        因此只应在确有需要修正的当前结论时使用，并配合去重；
+      · 顶层 systemMessage 显示给用户；
+      · exit 0 时写 stderr 的文本【模型永远看不到】—— 修前大量「放行但
+        标未验证」的提醒正是这种写法，等于没有提醒。
+
+    本函数只证明「已登记到输出对象」。宿主是否接收、模型是否采纳，
+    本进程无法观察 —— 调用方不得据此声称「模型已纠正」。
+    """
+    slot = "user" if deliver == "user" else "model"
+    if not text:
+        return
+    _PENDING[slot].append(str(text).strip())
+
+
+def notify_once(session_id, key, text, deliver="model", window_s=300):
+    """登记一条非阻断提醒；同一会话同一 key 在窗口内只登记一次。
+
+    返回 True = 本次登记了，False = 被去重或内容为空。
+    ⚠️ 「登记了」不等于「宿主已接收」，更不等于「模型已采纳」。
+    """
+    if not text:
+        return False
+    if _delivery_seen(session_id, key, window_s):
+        return False
+    emit_context(text, deliver=deliver)
+    return True
+
+
+def _delivery_seen(session_id, rule_id, window_s=300):
+    """同一会话同一规则在窗口内只送达一次（减少无效打扰）。
+
+    返回 True = 窗口内已经登记过（调用方应跳过）；
+         False = 未登记过，或状态读/写失败。
+    ⚠️ 读失败一律返回 False（允许送达）——
+       去重失败不该导致提醒消失。
+    """
+    try:
+        p = state_path(session_id or "nosession", "deliver")
+        st = load_state(p) or {}
+        now = _time.time()
+        last = st.get(rule_id)
+        if isinstance(last, (int, float)) and (now - last) < window_s:
+            return True
+        st[rule_id] = now
+        save_state(p, st)
+        return False
+    except Exception:
+        return False
+
+
 def read_input():
     """读取 hook stdin 的 JSON。任何异常都返回 {}，绝不抛出。"""
     try:
         raw = sys.stdin.buffer.read().decode("utf-8", "replace")
         if not raw.strip():
             return {}
-        return json.loads(raw)
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            # tool_use_id：宿主给这次工具调用的唯一 ID（PreToolUse 家族有）。
+            # Stop / UserPromptSubmit 没有，留空 —— 不伪造。
+            _INPUT_META["tool_use_id"] = data.get("tool_use_id")
+            _INPUT_META["hook_event"] = data.get("hook_event_name")
+            _INPUT_META["tool_name"] = data.get("tool_name")
+            _INPUT_META["session_id"] = data.get("session_id")
+        return data
     except Exception:
         return {}
 
@@ -86,13 +186,28 @@ def emit_json(obj):
         UnicodeEncodeError → budget_gate 的兜底把它变成 exit 0 =
         【整道门 fail-open】（本该 deny 的场景被放行）。
         修法：5 处 reconfigure 全部补 errors="replace"（与模块级意图一致）。
+
+    ⚠️ 3.5.19 修补：一个 hook 进程只能输出【一个】JSON 对象。
+       stdout 上出现两个对象时宿主解析会失败（非阻断错误 → 判定失效）。
+       因此本函数只允许写一次；第二次写 stderr 留痕并丢弃。
+       需要「先提醒、后判定」的场景走 emit_context() 的待发队列（见下）。
     """
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    if _EMITTED.get("done"):
+        try:
+            sys.stderr.write(
+                "[行为门] 已输出过 JSON，丢弃第二次输出（避免宿主解析失败）\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        return False
+    _EMITTED["done"] = True
     sys.stdout.write(json.dumps(obj, ensure_ascii=False))
     sys.stdout.flush()
+    return True
 
 
 def emit_text(text):
@@ -120,7 +235,12 @@ def deny(reason, hook_event="PreToolUse", gate_id=None, rule_id=None,
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    emit_json({
+    _obj = _pending_payload(hook_event, {
+        "hookEventName": hook_event,
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    })
+    emit_json(_obj or {
         "hookSpecificOutput": {
             "hookEventName": hook_event,
             "permissionDecision": "deny",
@@ -153,23 +273,99 @@ def deny_stop(reason, gate_id=None, rule_id=None, tool=None,
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    emit_json({"decision": "block", "reason": reason})
+    # Stop 的 block reason 本身就会回到模型；pending 里的提醒只是补充。
+    # additionalContext 在 Stop 上会继续对话，因此调用方必须自行保证
+    # 「只在确有需要修正的结论上登记」，并且用 _delivery_seen 去重。
+    _obj = {"decision": "block", "reason": reason}
+    _pend = _pending_payload("Stop")
+    if _pend:
+        _obj.update(_pend)
+    emit_json(_obj)
     sys.stderr.write(reason + "\n")
     sys.stderr.flush()
     sys.exit(2)
 
 
 def warn_inactive(gate_name, why):
-    """门未生效时，把原因说给用户听。非阻断。"""
+    """门未生效时，把原因说给用户听。非阻断。
+
+    3.5.19（审计修正项 1）：除 stderr 之外，同时记一条 inactive 事件。
+    修前「门没生效」完全不可统计 —— 日志里既没有 deny 也没有 warn，
+    与「门正常运行但没命中」无法区分。这正是审计里
+    「正常返回被当语义成功、超时与保护成败混合」的一半来源。
+    """
     try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     sys.stderr.write("[%s] 未生效：%s\n" % (gate_name, why))
     sys.stderr.flush()
+    try:
+        m = re.match(r"\s*(G\d+)", gate_name or "")
+        record_gate_event(m.group(1) if m else None, "inactive", "inactive",
+                          tool=_INPUT_META.get("tool_name"),
+                          session_id=_INPUT_META.get("session_id"),
+                          extra={"gate_name": gate_name,
+                                 "why": " ".join(str(why).split())[:117],
+                                 "delivery_channel": "systemMessage"})
+    except Exception:
+        pass
+    # 3.5.19 修补：「门没生效」是用户应当知道的运行状态，走 systemMessage。
+    # 只登记，不立即输出 —— 本函数之后可能还要继续判定并 deny，
+    # 立即输出会让 deny 的 JSON 变成第二个对象而被丢弃。
+    emit_context("[%s] 未生效：%s" % (gate_name, why), deliver="user")
+
+
+def warn_gate(gate_id, rule_id, message, tool=None, session_id=None, extra=None,
+              deliver="model"):
+    """门发出的一次【非阻断提醒】：记事件 + 通过宿主支持的字段送达。
+
+    ⚠️ 为什么必须记录：3.5.19 审计确认「6 次警告被当 6 次 Bash」——
+       修前警告只写 stderr，事件日志里没有，事后只能从工具调用反推。
+
+    ⚠️ 3.5.19 修补：修前这里【只写 stderr】。本机 Claude Code 2.1.152
+       的官方文档写明「Claude never sees stderr from a hook that exits 0」，
+       所以那些提醒模型和用户都收不到 —— 日志里有、实际没送达。
+       现在：
+         deliver="model" → hookSpecificOutput.additionalContext（模型可见）
+         deliver="user"  → 顶层 systemMessage（用户可见）
+         deliver=None    → 只记录，不送达（保留旧行为的能力）
+
+       事件里的 delivery_channel 只表示【本路径会登记到哪个输出通道】，
+       不表示宿主已接收、更不表示模型已采纳。三者不能混写。
+    """
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(message if str(message).endswith("\n")
+                         else str(message) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    ev_extra = dict(extra or {})
+    if deliver:
+        ev_extra["delivery_channel"] = ("additionalContext" if deliver == "model"
+                                else "systemMessage")
+    sid = session_id or _INPUT_META.get("session_id")
+    # 同一会话同一规则 5 分钟内只送达一次 —— 警告不该每次都刷。
+    # 事件仍逐次记录，保证可统计。
+    if deliver and not _delivery_seen(sid, "%s:%s" % (gate_id, rule_id)):
+        emit_context(message, deliver=deliver)
+    record_gate_event(gate_id, rule_id, "warn", tool=tool,
+                      session_id=session_id, extra=ev_extra)
 
 
 def allow():
+    """放行。把待发提醒合并成一个 JSON 输出后 exit 0。
+
+    ⚠️ 没有待发提醒时【保持完全安静】—— 不输出 permissionDecision: allow，
+       也不输出任何 JSON。普通放行必须走宿主原有的权限流程。
+    """
+    obj = _pending_payload(_INPUT_META.get("hook_event") or "PreToolUse")
+    if obj:
+        emit_json(obj)
     sys.exit(0)
 
 
@@ -245,9 +441,30 @@ def _read_source_snapshot():
 
 def record_gate_event(gate_id, rule_id, decision, tool=None,
                       session_id=None, extra=None):
-    """记录一次真实 Gate 干预。**永不抛异常、永不改变判定。**
+    """记录一次 Gate 的判断结果。**永不抛异常、永不改变判定。**
 
-    只记「门出手了」的事件（deny / block / stop_feedback），不记 allow。
+    decision 的取值（3.5.19 统一定义，分析时不要混用）：
+      deny              策略拒绝（宿主会看到 permissionDecision=deny）
+      stop_feedback     收尾门要求补证据（Stop 家族）
+      stop_feedback_retry  重试轮次未再阻断（放行，但判定仍不合规）
+      warn              门发出了非阻断提醒，但【没有拦截】
+      inactive          门本轮未生效（脚本异常 / 状态不可读）
+      review_*          语义评审自身的调用结果（allow / block / insufficient）
+                        —— 记的是「评审怎么说」，不是「门怎么判」
+      allow_*           门评估后选择放行，但带一个【需要记录的理由】：
+                        allow_waived_by_user / allow_unobserved /
+                        allow_weak_backing / allow_with_observed_results /
+                        allow_by_inline_evidence / allow_by_historical_reference
+                        —— 这些是「记录决定」，不是「证明结论为真」。
+
+    ⚠️ 计数口径：一条事件 = 一次【判定记录】，不等于一次工具调用、
+       也不等于一次有效保护。同一次调用可以产生多条事件（例如
+       review_block + stop_feedback），关联靠 tool_use_id（PreToolUse 有）
+       或 session+ts（Stop/UserPromptSubmit 没有 tool_use_id）。
+
+    ⚠️ 纯粹「什么都没命中、直接放行」【不记】—— 每次工具调用都记会让
+       日志淹没真正的事件。因此「没有事件」表示「门没有出手」，
+       不表示「门没运行」。两者的区分靠宿主回执，不靠本文件。
 
     ⚠️ 绝不写入：完整 prompt / assistant 输出 / 完整 command /
        Write·Edit 正文 / MCP payload / 环境变量值 / 任何密钥。
@@ -263,6 +480,13 @@ def record_gate_event(gate_id, rule_id, decision, tool=None,
             "rule_id": rule_id,
             "decision": decision,
             "tool": tool,
+            # 关联键：同一 tool_use_id 的事件属于同一次工具调用。
+            # 宿主没给（Stop / UserPromptSubmit）时为 None，不编造。
+            "tool_use_id": _INPUT_META.get("tool_use_id"),
+            "hook_event": _INPUT_META.get("hook_event"),
+            # 本进程内耗时（毫秒）。不含宿主排队/调度，也不覆盖被超时
+            # 杀死的情况 —— 那时本函数没有机会执行。
+            "elapsed_ms": int((_time.monotonic() - _PROCESS_T0) * 1000),
             "source_class": source_class(),
             "version": _read_version_file(),
             "source_snapshot": _read_source_snapshot(),

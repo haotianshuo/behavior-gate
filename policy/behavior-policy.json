@@ -1,13 +1,14 @@
 {
   "_comment": "行为门策略内核（工具无关）。适配器读取本文件，不硬编码规则。",
-  "_version": "3.5.18",
-  "_version_note": "本文档与程序注释里出现的「本地候选 3.6.x」是【本地开发轮次编号】，不是已发布版本。实际软件版本以 adapters/claude-code/hooks/VERSION 为准（当前 3.5.18）；正式发布以 GitHub Releases 页为准（此处不写死版本号——它每次发布都会变）。两者不是同一条线 —— 本地候选轮次全部未提交、未打标签、未发布。之所以不把它们写进 VERSION：用户明确要求版本号不随每轮开发自动加号，内容变化由 SOURCE_IDENTITY.snapshot 区分。",
+  "_version": "3.5.19",
+  "_version_note": "本文档与程序注释里出现的「本地候选 3.6.x」是【本地开发轮次编号】，不是已发布版本。实际软件版本以 adapters/claude-code/hooks/VERSION 为准（当前 3.5.19）；正式发布以 GitHub Releases 页为准（此处不写死版本号——它每次发布都会变）。两者不是同一条线 —— 本地候选轮次全部未提交、未打标签、未发布。之所以不把它们写进 VERSION：用户明确要求版本号不随每轮开发自动加号，内容变化由 SOURCE_IDENTITY.snapshot 区分。",
   "_v25_note": "删除 bash_rounds / webfetch 的预算声明 —— 它们从未被执行，是假能力。声明一个不被执行的上限，比不声明更糟。",
   "_removed_sections": "3.5.6 删除 gateway_budget 整段。它是同一个毛病的第三次出现：声明了但没有任何 hook 读它。它自己的注释写着「装一个不生效的开关比没有开关更糟」—— 而它正是那个开关。用户把它改成 true 也不会有任何事发生，这是个陷阱。跨工具边界已正确记录在 README 的「刻意不做的」段，不需要伪装成配置项。",
   "budget": {
     "agent_spawns": 0,
     "agent_depth": 1,
     "_note": "agent_spawns 有 PreToolUse 强制；agent_depth 有子代理检查。这两个是硬上限。",
+    "_g1_semantics": "3.5.19：G1 是【独立资源预算】，不是质量保证。agent_spawns 默认 0 只是当前的成本/范围选择 —— 它既不表示子代理会降低质量，也没有实测数据能支持「限制后效果更好」这类结论。要放开就改这个数字，不要把它当成正确性开关。",
     "_removed": "bash_rounds / webfetch 曾声明为 40 / 5，实际本会话用了 143 次 Bash（超 3.6 倍）且门不拦。声明一个不被执行的上限 = 假能力，已删除。",
     "_removed_status": "3.5.3 已重新引入同类能力，但语义不同：下面是【警告阈值】而非硬上限，由 closeout_gate 实际读取并在越阈时打印一行。见 _warn_note。",
     "bash_warn_at": 300,
@@ -19,7 +20,7 @@
   "effect_gate": {
     "enabled": true,
     "_note": "风险分级：低→L1 / 中→L2 / 高→L3。未声明按中风险从严。",
-    "_known_limit": "只检查证据【格式】，不检查证据【真伪】。实测：写 'L3 端到端' 但不真的验证，可以过。",
+    "_known_limit": "仍然不校验证据【真伪】，也无法确认观测属于同一个对象/操作。3.5.19 起增加的是【相关性检查】：读 transcript 尾部（有界：512KB / 800 行 / 40 条结果），区分三件事 —— ①发现观测（会话里有工具结果）②支持当前声明（声明里的具体观测在成功结果里找到对应）③信息不足（截断/读不到/只有失败结果）。只有②且结果之后无写操作才记 verified；其余允许交付但记 allow_unconfirmed，并通过 additionalContext 提醒一次。正文里的『exit code 0』不再自行成为证据，必须与真实成功结果对上。失败结果只在声明是『已复现/预期失败』时支撑该结论，不支撑『测试通过』。读不到 transcript 或已截断时记为未确认，不据此指控。",
     "_false_positive": "历史误报案例不能作为当前版本误报率的依据。当前误报率需在固定源码快照、用途和时间窗下人工复核，并同时报告样本量、纳入范围及标注口径；仅有拦截次数不能证明拦截正确。"
   },
   "destructive_gate": {
@@ -42,10 +43,12 @@
     "_was": "3.5.2 及之前这里是 false 并写着「默认关闭」。但那个开关【没有任何代码读它】—— 声明与行为不一致，同 #2/#21 的形状。3.5.3 修：门现在真的读这个开关。"
   },
   "protocol_card": {
-    "enabled": true,
-    "_note": "P1（任务理解）/ P2（逐项验证）工作协议卡片。由 inject_budget.py 在每次 UserPromptSubmit 时读取并注入上下文 —— 目的是让协议不再依赖用户手动粘贴卡片。",
+    "enabled": false,
+    "boundary_line": true,
+    "_note": "3.5.19 起默认关闭。修前每轮注入任务合同 / 固定验证流程 / 收尾三报 —— 这些是【编程习惯建议】，不是门，程序既不检查是否被遵守，也无法判断自然语言是否被理解正确。默认注入等于让门替用户规定工作方式。需要的人可把 enabled 设为 true 自行打开。",
+    "_boundary_line": "始终保留的一行【事实陈述】：程序实际检查的只有 预算(G1) / 证据块与级别(G3) / 危险命令(G5) / 意图(G7)。它与编程习惯无关，只说明门的真实能力边界；设为 false 可一并关闭。",
     "_no_force": "⚠️ 本项【没有强制力】，也不是门。程序只负责【送达】这条指导，【不检查】它是否被遵守，也【不能】保证自然语言被理解正确。因此它不出现在 README 的门表里。",
-    "_wired": "该键确实被 inject_budget.py 的 proto = policy.get(\"protocol_card\") 读取；设为 false 即停止注入。",
+    "_wired": "该键确实被 inject_budget.py 的 proto = policy.get(\"protocol_card\") 读取；enabled=false 停止习惯卡片，boundary_line=false 连边界行一起停止。",
     "_why_in_policy": "放进策略文件是为了可关闭、可审计；不是为了伪装成一条强制规则。"
   },
   "semantic_review": {

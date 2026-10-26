@@ -32,7 +32,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (  # noqa: E402
     read_input, deny_stop, allow, load_policy, warn_inactive,
-    record_gate_event,
+    record_gate_event, state_path, load_state, notify_once,
 )
 
 
@@ -412,6 +412,161 @@ def analyze(msg):
     risk_m = RISK_RX.search(msg)
     risk = risk_m.group(1).replace("风险", "") if risk_m else None
     return claim, level, level_num, risk
+
+
+# ---------------------------------------------------------------- 历史引用（3.5.19）
+#
+# 审计案例 B：收尾里写
+#   「10/25 23:16 的……是已有合法修复，RESULTS 已记录其定向验证通过。
+#     必须保留，不要回退。」
+# 门抽中「验证通过」，要求补本轮生效证据 —— 但这句话是在【确认更早的结果】，
+# 原文还明确说本轮没做浏览器验证。这是归属误拦，不是纠错。
+#
+# 判据刻意保守，且只用于【不拦截】这一侧：
+#   · 同一句里要有完成词，并且【历史标记出现在完成词之前】；
+#   · 历史标记 = 明确日期，或强指代（已有/上一轮/此前/上次/原报告…）；
+#   · 同一句里出现「现在 / 本轮 / 这次 / 刚刚」等当前语态 → 一律不算历史，
+#     继续按当前声明处理（避免「我之前的判断错了，现已修复」被放过）。
+# ⚠️ 边界：这是行内字符串判据，不是归属理解。没有显式标记的历史引用
+#    仍由语义评审判断（见 review_unit 的 _CLAIM_PROMPT）。
+#    命中会记事件并打印提示，不是静默放行。
+_HIST_DATE_RX = re.compile(
+    r"(\d{1,2}\s*[/\-月]\s*\d{1,2}|\d{4}\s*[/\-年]\s*\d{1,2}"
+    r"|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b)")
+_HIST_REF_RX = re.compile(
+    r"(已有(合法)?修复|已有结果|已有记录|上一轮|上一次|上次|此前|之前|前一轮|历史)")
+# 当前语态否决词：出现即【不算历史引用】。
+# 3.5.19 补充「现已 / 目前」—— 既有回归用例 B6「此前的问题现已修复」
+# 就是在确认【当前】状态，曾有历史标记（此前）但必须按当前声明处理。
+_HIST_CURRENT_VETO_RX = re.compile(
+    r"(现在|现已|目前|本轮|这次|本次|这轮|刚|刚刚|今天)")
+
+
+def _historical_reference(seg):
+    """若这一句在确认更早的结果，返回该句；否则 None。"""
+    if not seg or not CLAIM_RX.search(seg):
+        return None
+    if _HIST_CURRENT_VETO_RX.search(seg):
+        return None
+    for sent in re.split(r"(?<=[。！？!?；;])", seg):
+        c = CLAIM_RX.search(sent)
+        if not c:
+            continue
+        for rx in (_HIST_DATE_RX, _HIST_REF_RX):
+            m = rx.search(sent)
+            if m and m.start() <= c.start():
+                return sent.strip()
+    return None
+
+
+def _drop_historical_sentences(text, session_id):
+    """剔掉历史引用句，返回 (过滤后文本, note)。
+
+    只剔【句子】，不剔整行 —— 同一行里可能既有历史引用又有本轮声明，
+    整行丢弃会连真声明一起放掉（那是静默漏拦）。
+    """
+    parts = re.split(r"(?<=[。！？!?；;\n])", text or "")
+    kept, dropped = [], []
+    for p in parts:
+        why = _historical_reference(p)
+        if why:
+            dropped.append(why)
+        else:
+            kept.append(p)
+    if not dropped:
+        return text, None
+    record_gate_event("G3", "historical_reference_dropped",
+                      "allow_by_historical_reference", tool="Stop",
+                      session_id=session_id,
+                      extra={"count": len(dropped),
+                             "excerpt": dropped[0][:100]})
+    return "".join(kept), ("已识别 %d 处历史引用（指向更早的结果），"
+                           "未据此要求补本轮证据" % len(dropped))
+
+
+# 普通表达里的具体观测结果（3.5.19，审计案例 C）。
+#
+# 修前只认固定证据块（EVIDENCE_RX），于是
+#   「这两个进程都正常响应：/m/ 都是 200」
+# 这种已有真实工具结果支撑的写法被判「缺证据块」，要求改写成模板 ——
+# 这是按格式强干预，不是按事实。
+#
+# ⚠️ 边界：这是【格式放宽】，不是真伪校验。门本来也校验不了真伪
+#    （见 policy.effect_gate._known_limit）。只在风险不是【高】时接受；
+#    高风险仍要求 L3 证据块，因为单项观测推不出端到端生效。
+INLINE_EVIDENCE_RX = re.compile(
+    r"((HTTP|状态码|status)\s*[:：]?\s*[1-5]\d\d"
+    r"|返回\s*[1-5]\d\d|响应\s*[1-5]\d\d"
+    r"|(都是|均为|全是|全为|都为)\s*[1-5]\d\d"
+    r"|\b[1-5]\d\d\s*(OK|Created|No Content|Not Found)"
+    r"|\b(exit|rc)\s*(code)?\s*[:=]?\s*0\b"
+    r"|listening\s+on\s+\S+)", re.I)
+
+# 3.5.19 修补：「预期失败」类声明。
+#   失败观测不能支撑「测试通过」；但当声明本身就是「已复现这个错误」，
+#   或验收条件按设计就是失败时，失败结果可以支撑【那个具体结论】。
+#   刻意保守：只认显式的复现/预期失败措辞，不认「失败」「报错」这类裸词
+#   （那会把「没有报错」也读成复现）。
+_REPRO_RX = re.compile(
+    r"(已复现|复现了|重现了|稳定复现|可以复现|能够复现"
+    r"|预期失败|按设计应当失败|应当失败|本来就是失败的"
+    r"|确认它失败了|错误已复现|问题已复现)", re.I)
+
+
+def _signals_text(r):
+    return " ".join(r.get("signals") or [])
+
+
+def _backing_state(asserted, scan, obs_tokens):
+    """把「发现观测」与「支持当前声明」分开。
+
+    返回 kind（互斥）：
+      matched     声明里的具体观测在【成功结果】里找到对应，且之后无写操作
+      stale       找到了对应，但那之后还有写操作 → 结果不能代表当前状态
+      unmatched   声明里有具体观测，结果里找不到对应（可能被截断）
+      repro       无具体观测，声明是「已复现/预期失败」，且有失败结果
+      generic     有成功结果，但没有任何具体观测能与声明对齐
+      failed_only 只有失败结果，且声明不是复现类
+      none        没有任何可核对观测
+
+    ⚠️ 本函数不做语义理解：只比对字面观测，不判断对象/操作是否同一件事。
+       因此 matched 也只表示「观测可对照」，不表示「结论为真」。
+    """
+    rs = scan.get("results") or []
+    ok = [r for r in rs if not r.get("is_error")]
+    err = [r for r in rs if r.get("is_error")]
+    claim_obs = obs_tokens(asserted)
+    ok_obs = set()
+    for r in ok:
+        ok_obs |= obs_tokens(_signals_text(r))
+    matched = [r for r in ok if obs_tokens(_signals_text(r)) & claim_obs] \
+        if claim_obs else []
+    stale = any(r.get("after_write") for r in matched)
+    repro = bool(_REPRO_RX.search(asserted or ""))
+
+    if claim_obs:
+        kind = ("stale" if (matched and stale)
+                else "matched" if matched else "unmatched")
+    elif repro and err:
+        kind = "repro"
+    elif any(r.get("signals") for r in ok):
+        # 有成功结果、也有可核对观测，但声明里没有具体观测可供对齐
+        kind = "generic"
+    elif any(r.get("signals") for r in err):
+        kind = "failed_only"
+    else:
+        # 有工具结果，但没有任何可核对的观测（读文件 / grep 之类）
+        kind = "none"
+    return {
+        "kind": kind,
+        "claim_obs": sorted(claim_obs),
+        "ok_obs": sorted(ok_obs),
+        "matched": len(matched),
+        "stale": bool(stale),
+        "ok_results": len(ok),
+        "err_results": len(err),
+        "repro": repro,
+    }
 
 
 # 否定 / 未来 / 条件语境（3.5.13 补，B2 误报一侧）。
@@ -880,6 +1035,22 @@ def _review_deadline(policy):
     return _time.time() + total
 
 
+def _verification_waived(session_id):
+    """本会话是否处于「用户已允许不做验证」的约束下。返回 (bool, 条件/None)。
+
+    ⚠️ 豁免只决定【允不允许交付】，不决定【能不能说已验证】。
+      用户说"别跑会写数据的测试"，门就允许不跑；
+      但那意味着交付时【没有验证结果】，不能说成"已验证通过"。
+    """
+    try:
+        st = load_state(state_path(session_id, "budget")) or {}
+    except Exception:
+        return False, None
+    if isinstance(st, dict) and st.get("intent_no_verify") is True:
+        return True, st.get("intent_verify_condition") or None
+    return False, None
+
+
 def _stmt_budget(policy):
     """单次评审请求预算（policy.semantic_review.timeout_s）。坏值回落 15.0。
 
@@ -991,6 +1162,8 @@ def _semantic_filter_references(asserted, policy, session_id,
     _tmax = _stmt_budget(policy)
     checked = 0
     dropped = []
+    hist_dropped = []
+    uncertain = []
     skipped_for_budget = 0
     skipped_for_cap = 0
     for i in hits:
@@ -1012,9 +1185,19 @@ def _semantic_filter_references(asserted, policy, session_id,
                          timeout_s=min(remaining, _tmax))
         checked += 1
         if r.get("ok") and r.get("verdict") == "allow":
-            # 评审结论：引用/命名/复述 —— 不算本回合的完成声明
+            # 评审结论：引用/命名/复述/历史结果 —— 不算本回合的完成声明
             dropped.append(i)
+            if (r.get("detail") or {}).get("attribution") == "historical_reference":
+                hist_dropped.append(i)
         elif r.get("ok") and r.get("verdict") == "block":
+            # 3.5.19（审计案例 B）：归属【不确定】时先提醒，不据此指控完成。
+            #   修前只要评审返回 block 就整段适用本门，于是「10/25 23:16 的……
+            #   已有合法修复，RESULTS 已记录其定向验证通过」被当成本轮声明去要证据。
+            #   归属不确定的正确处置是提出疑问，而不是要求补材料。
+            if (r.get("detail") or {}).get("attribution") == "uncertain":
+                uncertain.append((i, (r.get("detail") or {}).get("object") or seg[:40]))
+                dropped.append(i)
+                continue
             # 找到一处真声明 → 本门适用，不必再查其余行
             break
         # insufficient（失败/超时）→ 不剔除，走原逻辑保守判定
@@ -1022,6 +1205,16 @@ def _semantic_filter_references(asserted, policy, session_id,
     notes = []
     if dropped:
         notes.append("语义评审剔除 %d 处引用性行（非本回合声明）" % len(dropped))
+    if hist_dropped:
+        record_gate_event("G3", "historical_reference_dropped",
+                          "allow_by_historical_reference", tool="Stop",
+                          session_id=session_id,
+                          extra={"count": len(hist_dropped), "source": "semantic"})
+    for _i, _obj in uncertain:
+        notes.append("归属不确定（%s）：按提醒处理，未据此要求补证据" % _obj[:40])
+        record_gate_event("G3", "claim_attribution_uncertain",
+                          "warn_attribution_uncertain", tool="Stop",
+                          session_id=session_id, extra={"object": _obj[:60]})
     if skipped_for_budget:
         # ⚠️ 预算耗尽必须留痕 —— 不许变成"看起来都查过了"
         notes.append("语义评审总预算耗尽，%d 行未做归属判断（按原逻辑处理）"
@@ -1134,20 +1327,42 @@ def main():
     #    修法：在入口处统一剥一次，之后所有判定都只看"断言"。
     asserted = _strip_quoted_context(msg)
 
+    # 3.5.19（审计案例 B）：先剔除【明确指向更早结果】的句子。
+    #
+    # 判据只是【不拦截】的一侧，且限定在同一句、标记在完成词之前，
+    # 并会被「现在/本轮/这次/刚刚」等当前语态否决。
+    # 未命中显式标记的历史引用不在这里处理，交给下面的语义评审判归属。
+    asserted, _hist_note = _drop_historical_sentences(
+        asserted, data.get("session_id"))
+    if _hist_note:
+        sys.stderr.write("【G3 生效门】%s\n" % _hist_note)
+        sys.stderr.flush()
+        if not retry:
+            notify_once(data.get("session_id"), "G3:hist-note",
+                        "【G3 生效门】%s" % _hist_note)
+
     # 不合规时的统一出口（#43）。
     # 三处 deny_stop 都改走这里 —— 「拦一次」的语义只有一处实现，
     # 避免"改了两处漏了第三处"（本项目 #19 的老毛病）。
     def _reject(reason, rule_id="unspecified"):
-        """首次阻断；重试轮次放行，但【放行必须可见】。
+        """首次阻断；重试轮次放行并记录（不再追加提醒）。
 
         rule_id 供 gate-events 记录用 —— 它区分「哪条 G3 判据拦的」，
         而 reason 文本不适合做统计键（会变）。
+
+        ⚠️ 3.5.19 修补：修前这里写「可见的放行」，实际只是 stderr ——
+           本机 Claude Code 2.1.152 下 exit 0 的 stderr 模型看不到。
+           重试轮次【不能】改发 additionalContext：那会继续对话，
+           与「第二次必放行、不为难用户」的设计相冲突。
+           因此这里如实降级为：只写日志 + 记 stop_feedback_retry，
+           不声称模型或用户看到了提示。
         """
         if retry:
             sys.stderr.write(
                 "【G3 生效门】本轮为重试轮次 → 已放行（不再次阻断）。\n"
                 "  原因：平台在连续阻断 8 次后会强制结束回合，重复阻断无意义。\n"
-                "  ⚠️ 但本次收尾仍【不合规】，这是【可见的放行】，不是通过：\n"
+                "  ⚠️ 本次收尾仍【不合规】。此提示只写入调试输出与事件日志，\n"
+                "     不追加模型上下文（避免形成新的对话循环）：\n"
                 "  %s\n"
                 % reason.splitlines()[0])
             sys.stderr.flush()
@@ -1175,6 +1390,11 @@ def main():
                                   session_id=data.get("session_id"))
             sys.stderr.write("【G3 生效门】%s\n" % _sem_note)
             sys.stderr.flush()
+            # 3.5.19 修补：归属不确定/引用剔除的说明必须送达模型，
+            # 否则它只留在日志里 —— 模型会以为门没看见。去重只发一次。
+            if not retry:
+                notify_once(data.get("session_id"), "G3:sem-note",
+                            "【G3 生效门】%s" % _sem_note)
 
     claim, level, level_num, risk = analyze(asserted)
 
@@ -1201,6 +1421,9 @@ def main():
             if _note2:
                 sys.stderr.write("【G3 生效门】%s\n" % _note2)
                 sys.stderr.flush()
+                if not retry:
+                    notify_once(data.get("session_id"), "G3:sem-find-note",
+                                "【G3 生效门】%s" % _note2)
 
     # ⚠️ B2 误报一侧（3.5.13）：把处在【否定/未来/条件语境】里的完成词剔除。
     #
@@ -1335,10 +1558,257 @@ def main():
 
     # --- 判定 ---
     if has_block and level_num is not None and level_num >= need:
+        # 3.5.19（修正方案第 3 项）：绿灯要落在【已发生的工具结果】上。
+        #
+        #   修前：证据块里写「**证据**：L3」就放行 —— 但那个级别是模型自己
+        #   填的标签，门从未看过本回合有没有产生过任何结果。
+        #
+        # 3.5.19 修补（只读核对后）：修前版本仍有两个洞 ——
+        #   ① results 非空就记「已验证」，不判断它是否支持【这条】声明；
+        #   ② truncated 时零观测会落到「已验证」分支（截断被当成了通过条件）。
+        #   现在用 _backing_state 把三件事分开：
+        #     · 发现观测   —— 会话里有工具结果
+        #     · 支持声明   —— 声明里的具体观测在【成功结果】里找到对应
+        #     · 信息不足   —— 截断/读不到/只有失败结果
+        #   只有「支持声明且之后无写操作」才记 verified；其余一律 allow
+        #   但记 allow_unconfirmed，并通过 additionalContext 提醒一次。
+        #
+        #   ⚠️ 这仍然【不能】证明结论为真 —— 它证明的是「观测能对上」。
+        #      证据块的等级依旧源自模型自报，这里做的是降低自报权重。
+        from result_scan import scan_session, summarize, obs_tokens
+        _scan = scan_session(data.get("transcript_path"))
+        _facts = summarize(_scan)
+        _rs = _scan.get("results") or []
+        _concrete = [r for r in _rs if r.get("signals")]
+        _sid = data.get("session_id")
+        _waived, _wcond = _verification_waived(_sid)
+
+        if _waived:
+            # 用户明确允许不验证 → 允许交付，但绝不标成"已验证"
+            record_gate_event("G3", "delivery_waived_unverified",
+                              "allow_waived_by_user", tool="Stop",
+                              session_id=_sid,
+                              extra={"condition": (_wcond or "")[:80],
+                                     "delivery_channel": "additionalContext"})
+            # Stop 的 additionalContext 会【继续对话】——
+            # 只在首轮登记一次，重试轮次不再追加，避免对话循环。
+            if not retry:
+                notify_once(_sid, "G3:waived",
+                            "【G3 生效门】用户已允许不做验证（%s）→ 按【豁免交付】放行。\n"
+                            "  ⚠️ 本次不是「已验证通过」：%s。\n"
+                            "     收尾请如实写「未验证 / NOT_MEASURED」，不要写成已验收。"
+                            % (_wcond or "未运行测试", _facts))
+            allow()
+
+        if not _scan.get("ok"):
+            # 读不到 transcript（无路径 / 读失败）→ 不据此指控，但必须留痕
+            record_gate_event("G3", "verification_unobserved",
+                              "allow_unobserved", tool="Stop",
+                              session_id=_sid,
+                              extra={"why": str(_scan.get("why"))[:80],
+                                     "delivery_channel": "additionalContext"})
+            if not retry:
+                notify_once(_sid, "G3:unobserved",
+                            "【G3 生效门】证据块为模型自报等级；%s，无法与已发生的结果对照。\n"
+                            "  ⚠️ 本轮不能写成「已验证通过」。" % _facts)
+            allow()
+
+        if not _rs:
+            if _scan.get("truncated"):
+                # ⚠️ 3.5.19 修补：truncated 【不能】作为通过条件。
+                #    尾部可见范围内没结果，只说明「没看到」，不说明「不存在」。
+                #    因此不记 verified，也不打回 —— 记为未确认。
+                record_gate_event("G3", "evidence_unconfirmed_truncated",
+                                  "allow_unconfirmed", tool="Stop",
+                                  session_id=_sid,
+                                  extra={"truncated": True,
+                                         "delivery_channel": "additionalContext"})
+                if not retry:
+                    notify_once(_sid, "G3:truncated",
+                                "【G3 生效门】transcript 只读了尾部且已截断；%s。\n"
+                                "  ⚠️ 门无法确认本轮结果，按【未确认】处理 ——\n"
+                                "     不是「已验证」，也不是指控。请按事实措辞。"
+                                % _facts)
+                allow()
+            # 整个 transcript 都在可见范围内，却一条工具结果都没有 ——
+            # 这时"L3 端到端已验证"没有任何可核对的来源。
+            # 不是按关键词指控，而是指出【事实层面缺少结果】。
+            _reject(
+                "【G3 生效门】证据块声称「%s」，但本会话没有任何工具结果可核对。\n"
+                "\n"
+                "  门读到的事实：%s\n"
+                "  → 没有任何命令执行/测试运行的输出可供对照。\n"
+                "\n"
+                "  这不是说你的结论一定错，而是说：现在没有【已发生的结果】\n"
+                "  支撑它，因此不能标记为已验证。请二选一：\n"
+                "    · 实际跑一次最小验证，让证据落在真实结果上\n"
+                "    · 把措辞降级为「已改，未验证生效（NOT_MEASURED）」\n"
+                "\n"
+                "  另：用户已明确豁免验证时，可直接写未验证交付 —— 但仍不能\n"
+                "  写成「已验证通过」。" % (claim.group(1), _facts),
+                "evidence_without_observed_result")
+
+        _b = _backing_state(asserted, _scan, obs_tokens)
+
+        if _b["kind"] == "matched":
+            # 唯一「安静放行」：声明里的观测与成功结果对上了，且之后无写操作。
+            record_gate_event("G3", "verified_by_observed_results",
+                              "allow_with_observed_results", tool="Stop",
+                              session_id=_sid,
+                              extra={"results": len(_rs),
+                                     "concrete": len(_concrete),
+                                     "matched": _b["matched"],
+                                     "claim_obs": ",".join(_b["claim_obs"])[:80],
+                                     "errors": int(_scan.get("errors") or 0),
+                                     "truncated": bool(_scan.get("truncated")),
+                                     "digests": [r.get("digest")
+                                                 for r in _concrete[:3]]})
+            allow()
+
+        if _b["kind"] == "repro":
+            # 声明本身是「已复现 / 预期失败」→ 失败结果可以支撑【那个结论】。
+            # ⚠️ 它不能支撑「测试通过」，所以 rule_id 与 verified 分开。
+            record_gate_event("G3", "verified_by_expected_failure",
+                              "allow_expected_failure", tool="Stop",
+                              session_id=_sid,
+                              extra={"errors": _b["err_results"]})
+            allow()
+
+        # 其余情况：允许交付，但【不记为已验证】。
+        if _b["kind"] == "stale":
+            _rule, _key = ("results_superseded_by_later_edit", "stale")
+            _why = ("声明里的观测确实出现过，但那之后还有写操作；\n"
+                    "    那条结果不能代表当前状态")
+        elif _b["kind"] == "unmatched":
+            _rule, _key = ("claim_observation_not_matched", "unmatched")
+            _why = ("声明里的具体观测（%s）没有在本会话的成功结果里找到对应。\n"
+                    "    可能是结果被截断，也可能观测来自别处"
+                    % (", ".join(_b["claim_obs"]) or "无"))
+        elif _b["kind"] == "generic":
+            _rule, _key = ("evidence_generic_unmapped", "generic")
+            _why = "有工具结果，但其中没有能与这条声明对齐的具体观测"
+        elif _b["kind"] == "failed_only":
+            _rule, _key = ("evidence_from_failed_runs_only", "failed_only")
+            _why = "只有【失败】的运行结果；失败不能支撑「通过」"
+        else:
+            _rule, _key = ("evidence_weakly_backed", "none")
+            _why = ("有工具结果，但里面没有可核对的观测"
+                    "（状态码 / 退出码 / 监听端口）")
+
+        record_gate_event("G3", _rule, "allow_unconfirmed", tool="Stop",
+                          session_id=_sid,
+                          extra={"results": len(_rs),
+                                 "ok": _b["ok_results"],
+                                 "err": _b["err_results"],
+                                 "claim_obs": ",".join(_b["claim_obs"])[:80],
+                                 "truncated": bool(_scan.get("truncated")),
+                                 "delivery_channel": "additionalContext"})
+        if not retry:
+            notify_once(_sid, "G3:" + _key,
+                        "【G3 生效门】放行，但本轮【不记为已验证】：\n"
+                        "  · %s\n"
+                        "  · %s\n"
+                        "  ⚠️ 这不等于你在造假，只说明当前无法把声明和结果对上。\n"
+                        "     收尾请按事实写「已验证 / 未验证 / 未确认」，不要写成已验收。"
+                        % (_why, _facts))
         allow()
 
     # 说"完成了"但根本没写 NOT_MEASURED / 证据
     if not has_block:
+        # 3.5.19（审计案例 C）：普通表达里的具体观测结果，不再强制改写成模板。
+        #
+        #   修前只认固定证据块，于是
+        #     「这两个进程都正常响应：/m/ 都是 200」
+        #   这种【确实有工具结果支撑】的写法被判"缺证据块"，要求补格式 ——
+        #   那是按格式干预，不是按事实。门要的是"有没有可核对的结果"，
+        #   不是"有没有照模板排版"。
+        #
+        #   边界（必须说清楚，否则又变成假能力）：
+        #     · 这只放宽【格式】，不校验真伪 —— 和证据块一样，门无法判断
+        #       那个 200 是不是真的发生过（见 policy 的 _known_limit）。
+        #     · 【高】风险不接受行内证据：单项观测推不出端到端生效
+        #       （进程/数据库/部署/生产环境最容易"局部通了 = 整体好了"）。
+        #     · 接受时会明确告知：这条证据能说明什么、不能说明什么。
+        _inline = INLINE_EVIDENCE_RX.search(asserted)
+        # 3.5.19 修补：「已复现 / 预期失败」类声明没有证据块时也应有路。
+        #   失败观测不能支撑「通过」，但能支撑「复现了这个错误」。
+        #   要求本会话确实有【失败的工具结果】，否则照旧打回。
+        _repro_inline = bool(_REPRO_RX.search(asserted)) and not _inline
+        if (_inline or _repro_inline) and effective_risk != "高":
+            # ⚠️ 3.5.19 修补：正文里写「exit code 0」不能自行成为证据。
+            #    修前这里只搜正文，于是「本会话零工具结果、只写一句 200」
+            #    也能放行 —— 那句话是模型自己的文字，不是工具返回。
+            #    现在要求与【真实的成功结果】对上：
+            #      · 对上 → 接受（仍然只证明这一项观测）
+            #      · 零结果且未截断 → 落到下面 _reject（没有来源）
+            #      · 读不到 / 截断 / 有结果但对不上 → 未确认，放行不指控
+            from result_scan import scan_session, obs_tokens
+            _iscan = scan_session(data.get("transcript_path"))
+            _isid = data.get("session_id")
+            _itrunc = bool(_iscan.get("truncated"))
+            _iscan_ok = bool(_iscan.get("ok"))
+            _iall = _iscan.get("results") or []
+            _iok = [r for r in _iall if not r.get("is_error")]
+            _ierr = [r for r in _iall if r.get("is_error")]
+            _observed = (_inline.group(0)[:60] if _inline else "复现/预期失败")
+            _iclaim = obs_tokens(_inline.group(0)) if _inline else set()
+            _iobs = set()
+            for _r in _iok:
+                _iobs |= obs_tokens(" ".join(_r.get("signals") or []))
+            _ihit = bool(_iclaim & _iobs)
+
+            if _iscan_ok and _repro_inline and _ierr:
+                # 失败观测支撑「已复现 / 预期失败」这一【具体结论】。
+                # ⚠️ 它不支撑「测试通过」—— 两者在这里分开记。
+                record_gate_event(
+                    "G3", "inline_evidence_repro",
+                    "allow_by_inline_evidence", tool="Stop", session_id=_isid,
+                    extra={"risk": effective_risk, "observed": _observed,
+                           "failed_runs": len(_ierr),
+                           "delivery_channel": "additionalContext"})
+                if not retry:
+                    notify_once(_isid, "G3:inline-repro",
+                                "【G3 生效门】按【复现 / 预期失败】放行"
+                                "（风险级别：%s）。\n"
+                                "  ⚠️ 失败结果只支撑「复现了这个错误」，"
+                                "不支撑「已通过」。"
+                                % effective_risk)
+                allow()
+
+            if _iscan_ok and _ihit:
+                record_gate_event(
+                    "G3", "inline_evidence_corroborated",
+                    "allow_by_inline_evidence", tool="Stop",
+                    session_id=_isid,
+                    extra={"risk": effective_risk,
+                           "observed": _observed,
+                           "results": len(_iok),
+                           "delivery_channel": "additionalContext"})
+                if not retry:
+                    notify_once(_isid, "G3:inline-ok",
+                                "【G3 生效门】行内观测已与本会话的工具结果对上"
+                                "（风险级别：%s）。\n"
+                                "  ⚠️ 它证明的是这一项观测，不是整体端到端生效。"
+                                % effective_risk)
+                allow()
+
+            if not (_iscan_ok and not _iall and not _itrunc):
+                # 读不到 / 被截断 / 有结果但对不上 → 未确认，不指控
+                record_gate_event(
+                    "G3", "inline_evidence_unconfirmed",
+                    "allow_unconfirmed", tool="Stop", session_id=_isid,
+                    extra={"risk": effective_risk, "observed": _observed,
+                           "scan_ok": _iscan_ok, "truncated": _itrunc,
+                           "delivery_channel": "additionalContext"})
+                if not retry:
+                    notify_once(_isid, "G3:inline-unconfirmed",
+                                "【G3 生效门】正文里有具体观测，但%s。\n"
+                                "  ⚠️ 本轮不记为已验证；请按事实措辞。"
+                                % ("transcript 已截断，无法对照" if _itrunc
+                                   else "无法在本会话的工具结果里找到对应"))
+                allow()
+            # 零结果且未截断 → 不接受行内证据，落到下面 _reject
+
         _reject(
             "【G3 生效门】你宣布了完成，但本回合没有生效证据块。\n"
             "⚠️ 若因同一原因反复被打回：先说明卡点、换一种验证思路，或把选择交回用户。\n"
@@ -1366,7 +1836,12 @@ def main():
             "    高（进程/数据库/部署/生产环境）    → L3 端到端\n"
             "\n"
             "  如果确实做不到，就把措辞改成「未验证 / NOT_MEASURED」——\n"
-            "  诚实地说没验证，比不验证就说完成，代价小得多。"
+            "  诚实地说没验证，比不验证就说完成，代价小得多。\n"
+            "\n"
+            "  ⚠️ 不是必须用上面的模板：正文里【已经写明】可核对的具体结果\n"
+            "     （HTTP 状态码、exit code、listening on …），并且本会话的工具结果\n"
+            "     里确有对应观测时，中/低风险直接接受。\n"
+            "     只写在正文里、没有任何工具结果可对照的，不视为证据。"
             % claim.group(1)
 ,
             "missing_effect_evidence"
@@ -1419,4 +1894,4 @@ if __name__ == "__main__":
         raise
     except Exception as e:
         warn_inactive("G3 生效门", "脚本异常，本次放行：%r" % (e,))
-        sys.exit(0)
+        allow()   # 与正常放行同路，让待发提醒有机会输出

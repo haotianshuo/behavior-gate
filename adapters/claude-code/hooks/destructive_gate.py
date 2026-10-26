@@ -24,7 +24,9 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import read_input, deny, allow, load_policy, warn_inactive  # noqa: E402
+from _lib import (  # noqa: E402
+    read_input, deny, allow, load_policy, warn_inactive, warn_gate,
+)
 
 
 # ---- 只在【会被执行】的上下文里拦（Bash command / MCP input）----
@@ -435,12 +437,117 @@ CONTENT_DENY = [
     },
 ]
 
+# ---- 读写性质判据（3.5.19，修正方案第 6 项）----
+#
+# 「只读数据库查询也反复告警」—— 审计里 app_db_touch 对任何提到
+# app/data/app.db 的命令都告警，包括 `sqlite3 app.db "select ..."`、
+# `ls`、`file`。告警一多，用户就会开始忽略它 —— 那等于没有告警。
+#
+# 判据只用于【警告规则】，三态：write / read / unknown。
+#   方向是「少打扰已确认的只读」，不是「把未知当成只读」，
+#   更不是「放行写操作」。
+#   ⚠️ 3.5.19 修补：修前这里写「判不出就照旧警告」，实现却是
+#      「判不出就跳过」—— 注释与行为相反。现在两者一致：unknown 仍告警。
+_WRITE_RX = re.compile(
+    r"(\b(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+(?:TABLE|INDEX|VIEW)"
+    r"|ALTER\s+TABLE|CREATE\s+(?:TABLE|INDEX|VIEW)|REPLACE\s+INTO|VACUUM|ATTACH)\b"
+    r"|\.(?:write|import|restore|dump)\b"
+    r"|>\s*[\"']?[^\s\"'|;&]*\.db\b"
+    r"|\b(?:cp|mv|rm|chmod|chown|truncate|touch)\b[^\n;&|]*\.db\b"
+    r"|open\s*\(\s*[^)\n]*\.db[^)\n]*['\"](?:w|a|w\+|a\+|r\+))", re.I)
+
+
+# 明确只读的形态。只有它命中、且没有写形态时才算「已确认只读」。
+# 刻意保守：`< file.sql`、`python x.py`、`sh -c "..."` 都不在这里 ——
+# 那些是「未知」，不是「只读」。
+_READ_RX = re.compile(
+    r"(\b(?:SELECT|PRAGMA|EXPLAIN)\b"
+    r"|\.(?:schema|tables|indexes)\b"
+    r"|\b(?:ls|dir|file|stat|head|tail|wc)\b)", re.I)
+
+
+def _looks_like_write(text):
+    """文本里是否有明确的写操作形态。"""
+    return bool(_WRITE_RX.search(text or ""))
+
+
+def _write_nature(text):
+    """三态判定：write / read / unknown。
+
+    ⚠️ 这是【静态字符串判据】，不是内容分析：
+       `sqlite3 db < data.sql`、`python migrate.py`、`cat x | sh`
+       都读不出实际目标 —— 它们一律是 unknown，不是 read。
+    """
+    t = text or ""
+    if _WRITE_RX.search(t):
+        return "write"
+    # `cat dump.sql | sqlite3 app.db` 看着像只读（cat 在命令位），
+    # 实际是把内容喂给数据库 —— 归 unknown，不归 read。
+    if re.search(r"\|\s*(?:sqlite3|psql|mysql|mariadb)\b", t, re.I):
+        return "unknown"
+    if _READ_RX.search(t):
+        return "read"
+    return "unknown"
+
+
+# ---- 执行 vs 文档引用（3.5.19，修正方案第 6 项）----
+#
+# 审计案例：「把危险命令写成文档也被拦」。修前整个 Bash command 走同一套
+# 命令规则，于是 `cat > doc.md <<EOF … rm -rf / … EOF` 这种【只是写文件】
+# 也被当成执行。
+#
+# 现在：cat/tee/printf/echo 的 heredoc 正文按【写入内容】检查（行锚定），
+# 不再按命令检查；命令本身（heredoc 之前的同一行）仍按命令检查。
+# 明确排除会执行正文的形态：正文被管道给 sh/bash/python（`cat <<EOF | sh`），
+# 或开头命令不是这几个写入工具 —— 一律维持原样，按命令处理。
+_HEREDOC_DOC_CMDS = {"cat", "tee", "printf", "echo"}
+_HEREDOC_RX = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _heredoc_doc_ranges(cmd):
+    """返回 heredoc 正文的 (start, end) 字符区间 —— 仅限不会被执行的正文。"""
+    if not cmd or "<<" not in cmd:
+        return []
+    lines = cmd.splitlines(True)
+    offs, pos = [], 0
+    for ln in lines:
+        offs.append(pos)
+        pos += len(ln)
+    ranges = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        m = _HEREDOC_RX.search(ln)
+        if not m:
+            i += 1
+            continue
+        head = ln[:m.start()].strip()
+        words = head.split()
+        first = words[0].strip("'\"") if words else ""
+        tail = ln[m.end():]
+        if first not in _HEREDOC_DOC_CMDS or "|" in tail:
+            i += 1
+            continue
+        tag = m.group(2)
+        start = offs[i] + len(ln)
+        j = i + 1
+        while j < len(lines) and lines[j].strip() != tag:
+            j += 1
+        end = offs[j] if j < len(lines) else len(cmd)
+        ranges.append((start, end))
+        i = j + 1
+    return ranges
+
+
 # ---- 只提示，不阻断 ----
 WARN = [
     {
         "id": "app_db_touch",
         "pattern": r"app/data/app\.db",
-        "why": "可能触及正式数据库。审计实证：曾有 +13 行未预判的审计日志写入。",
+        # 3.5.19：只读操作不再告警（判据见 _WRITE_RX）。判不出时仍告警。
+        "requires_write": True,
+        "why": "可能【写入】正式数据库。审计实证：曾有 +13 行未预判的审计日志写入。\n"
+               "  只读查询（select / ls / file）不再触发本条。",
     },
     {
         # ⚠️ 3.5.13 由 DENY 降为 WARN（外部复核 + 本机实测坐实）。
@@ -501,14 +608,16 @@ def _compile(rules, where="?"):
             out.append((r, re.compile(r["pattern"], flags)))
         except Exception as e:
             # 可见 —— 但只警告一次每条，不阻断（一条坏规则不该让门失效）
-            sys.stderr.write(
+            # 3.5.19：配置规则被跳过 = 实际防护比声明弱，属于必须可统计的事件。
+            warn_gate(
+                "G5", "config_rule_skipped",
                 "[G5 配置警告] %s 的第 %d 条规则被【跳过】，它不会生效：\n"
                 "  规则内容：%r\n"
                 "  原因：%s\n"
                 "  合法格式：{\"id\": \"...\", \"pattern\": \"正则\", "
                 "\"why\": \"...\", \"instead\": \"...\"}\n"
-                % (where, i, r, e))
-            sys.stderr.flush()
+                % (where, i, r, e),
+                extra={"where": where})
     return out
 
 
@@ -565,8 +674,17 @@ def main():
         #    MCP 通道早有 _to_matchable 做容器归一，Bash 通道没有 ——
         #    又是"只在一侧修好"。现统一走 _to_matchable（None → ""，
         #    list → argv 语义拼接，标量 → str）。
-        targets = [("command", _to_matchable(ti.get("command")), cmd_rules),
-                   ("command", _to_matchable(ti.get("command")), warn_rules)]
+        # 3.5.19：heredoc 正文若只是在【写文件】（cat/tee/printf/echo），
+        # 按写入内容检查（行锚定），不按命令检查 —— 见 _heredoc_doc_ranges。
+        # 命令部分照旧按命令检查；区间只用于跳过"正文里的匹配"。
+        _cmd_text = _to_matchable(ti.get("command"))
+        _doc_ranges = _heredoc_doc_ranges(_cmd_text)
+        _doc_text = "\n".join(_cmd_text[a:b] for a, b in _doc_ranges)
+        targets = [("command", _cmd_text, cmd_rules, _doc_ranges),
+                   ("command", _cmd_text, warn_rules, ())]
+        if _doc_text.strip():
+            targets.append(("command(heredoc 正文)", _doc_text,
+                            content_rules, ()))
     elif tool.startswith("mcp__"):
         # 逐字段取真实值，而不是 repr(整体) —— 让锚定在 MCP 通道同样成立。
         # 但【不】把两套规则混用：命令类字段 → cmd_rules，
@@ -601,7 +719,7 @@ def main():
                 # 只对【已知会执行】的字段套命令规则。
                 # ⚠️ 值必须是 _to_matchable(v) 而不是 str(v) —— 容器值的
                 #    repr 形态会让全部命令规则失配（审计实测，见该函数注释）。
-                items.append((field, _to_matchable(v), cmd_rules))
+                items.append((field, _to_matchable(v), cmd_rules, ()))
             else:
                 # 已知内容字段 + 【名单外字段】→ 都只过 content_rules。
                 #
@@ -629,7 +747,7 @@ def main():
                 #      且其命令字段名不在 MCP_CMD_FIELDS 里 → 会漏拦。
                 #    这是刻意取舍，与「门是防误操作层，不是安全边界」一致。
                 #    见 install.md 的「已知边界」。
-                items.append((field, _to_matchable(v), content_rules))
+                items.append((field, _to_matchable(v), content_rules, ()))
         targets = items
     elif tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
         # 只对内容做损害性检查；路径单独只看是否指向敏感位置。
@@ -644,29 +762,58 @@ def main():
         items = []
         for k in ("content", "new_string", "new_source"):
             if ti.get(k):
-                items.append((k, str(ti[k]), content_rules))
+                items.append((k, str(ti[k]), content_rules, ()))
         edits = ti.get("edits")
         if isinstance(edits, list):
             for i, ed in enumerate(edits):
                 if isinstance(ed, dict) and ed.get("new_string"):
                     items.append(("edits[%d].new_string" % i,
-                                  str(ed["new_string"]), content_rules))
+                                  str(ed["new_string"]), content_rules, ()))
         for k in ("file_path", "notebook_path"):
             if ti.get(k):
-                items.append((k, str(ti[k]), warn_rules))
+                items.append((k, str(ti[k]), warn_rules, ()))
         targets = items
     else:
         allow()
 
-    for field, text, rules in targets:
+    for field, text, rules, skip_ranges in targets:
         if not text:
             continue
         for rule, rx in rules:
             m = rx.search(text)
             if not m:
                 continue
+            # heredoc 正文里命中命令规则 → 那是写入内容，不是执行
+            if skip_ranges and any(a <= m.start() < b for a, b in skip_ranges):
+                continue
+            # 3.5.19 修补：「读不出内容」必须与「已确认只读」分开。
+            #   修前这里是二值：没有写形态就当成只读并静默跳过 ——
+            #   而 `.sql` 文件、脚本内部、变量拼接都属于【未知】，
+            #   跳过它等于把漏判说成了「已确认只读」。
+            #   现在三态：write / read / unknown。
+            #     write   → 告警（原规则）
+            #     read    → 不告警（少打扰真实只读）
+            #     unknown → 仍告警，并在文案里标明「读写性质未能确定」
+            #   ⚠️ 这仍然不是拦截，也不改变任何 deny 规则。
+            _nature = None
+            if rules is warn_rules and rule.get("requires_write"):
+                _nature = _write_nature(text)
+                if _nature == "read":
+                    continue
             if rules is warn_rules:
-                sys.stderr.write("[G5 警告] %s：%s\n" % (rule.get("id"), rule.get("why", "")))
+                # 3.5.19：警告同时落事件（修前只写 stderr，日志里看不到，
+                # 审计时 6 次警告被当成 6 次普通 Bash 调用）。
+                _msg = ("[G5 警告] %s：%s"
+                        % (rule.get("id"), rule.get("why", "")))
+                if _nature == "unknown":
+                    _msg += ("\n  ⚠️ 本条命令的读写性质【未能确定】"
+                             "（文件内容 / 脚本内部 / 变量拼接不在静态检查内）。\n"
+                             "     按原规则告警，不代表已确认它会写入。")
+                warn_gate("G5", rule.get("id") or "warn_pattern",
+                          _msg,
+                          tool=tool, session_id=data.get("session_id"),
+                          extra={"field": field,
+                                 "write_nature": _nature or "not-applicable"})
                 continue
             deny(
                 "【G5 危险门】已阻断：%s\n"
@@ -680,16 +827,25 @@ def main():
                 "  改用什么写法：\n"
                 "  %s\n"
                 "\n"
-                "  ⚠️ 本门对命令文本做【纯字符串匹配】—— 它不区分\n"
-                "     「我在执行这个命令」和「我在把它写进一个文件」。\n"
-                "     所以 `cat > 文档 <<EOF … 该词 … EOF` 这种【只是写文件】的写法\n"
-                "     同样会被拦（实测确认）。\n"
+                "  本次检查了什么（事实范围，不代表覆盖完整）：\n"
+                "    · 这一段文本里【已知会翻车】的字面写法（删根、模糊杀进程、\n"
+                "      覆写块设备等），以及它落在命令位还是写入内容位。\n"
+                "  本次【没有】检查什么：\n"
+                "    · 变量/通配符展开后的实际目标；\n"
+                "    · Python / Node / 其他脚本内部的删除逻辑；\n"
+                "    · 换一种语言表达同一个意图的写法。\n"
+                "  换写法绕过本门，不会让那个动作变安全 ——\n"
+                "  G5 是【防误操作层】，真正的边界是沙箱 / 系统权限 / 备份。\n"
                 "\n"
-                "     这是【有意的保守】：在命令里做 use-mention 剥离不安全 ——\n"
-                "     sh -c 里带引号的危险命令照样会执行，剥掉就等于放行。\n"
-                "     但在写文档/写测试的场景，你可以把触发词拆开写\n"
-                "     （例如把词拆成两段拼接）—— 那不是绕过门，\n"
-                "     而是把「我在引用它，不是在执行它」这件事表达清楚。\n"
+                "  ⚠️ 执行与文档引用的区分（3.5.19）：\n"
+                "     · `cat/tee/printf/echo > 文件 <<EOF …` 的正文按【写入内容】检查，\n"
+                "       句中提及放行；只有正文里【独占一行】的危险命令仍会被拦。\n"
+                "     · 正文被管道给 sh/bash/python（`cat <<EOF | sh`）、\n"
+                "       或其他会执行它的形态，仍按【命令】检查。\n"
+                "     · `sh -c '…'`、变量拼命令等无法安全剥离的写法维持保守拦截 ——\n"
+                "       剥掉引号就等于放行真的执行。\n"
+                "     如果确实是在写文档/测试而模式独占一行，把它放进句子中间，\n"
+                "     或改成占位写法（那是把「引用」表达清楚，不是绕过门）。\n"
                 "\n"
                 "  误判？不要重试同一条命令，也不要绕开。\n"
                 "  改用等价但精确的写法，或直接告诉用户「我要做 X，被 G5 拦了，因为 Y」。"
@@ -709,4 +865,4 @@ if __name__ == "__main__":
         raise
     except Exception as e:
         warn_inactive("G5 危险门", "脚本异常，本次放行：%r" % (e,))
-        sys.exit(0)
+        allow()   # 与正常放行同路，让待发提醒有机会输出
