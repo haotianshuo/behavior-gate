@@ -554,6 +554,11 @@ def _write_relevance(asserted, writes):
     return False if known else None
 
 
+_EVIDENCE_FIELD_RX = re.compile(
+    r"^\s*\**(?:证据(?:级别)?|生效验证|检查结果|验证结果|测试结果|EVIDENCE)"
+    r"\s*\**\s*[:：]", re.I)
+
+
 def _claim_units(text):
     """把正文拆成【需要有证据支持的当前声明】单元。
 
@@ -565,31 +570,50 @@ def _claim_units(text):
       · 复现类句子 → kind="repro"
       · 完成 / 通过类句子 → kind="success"
       · 同一句同时含两类 → kind="mixed"（无法可靠拆分 → 未确认）
-      · 否定 / 假设语境里的完成词不算当前声明（复用既有 NegEx 判据）
+      · 否定 / 假设 / 定语引用复用 _drop_negated_claims，含子句边界
+      · 同一事项中，唯一紧邻声明可接收明确的证据字段续行
+      · 多个声明共享一份证据、跨段 / 列表项 / 标题的归属不猜
     """
     out = []
-    for sent in re.split(r"(?<=[。！？!?；;\n])", text or ""):
-        s = sent.strip()
-        if not s:
-            continue
-        m_claim = CLAIM_RX.search(s)
-        m_repro = _REPRO_RX.search(s)
-        if not m_claim and not m_repro:
-            continue
-        if m_claim:
-            spans = _negation_spans(NEGATED_CLAIM_CTX, s)
-            neg = _last_negation_in(spans, 0, m_claim.start())
-            if neg is not None and not _negation_scope_closed(
-                    neg, s, m_claim.start()):
-                if not m_repro:
+    # 复用已有事项边界：新列表项、空段会自然结束上一个证据归属。
+    for item in _iter_items(text or ""):
+        pending = []
+        evidence_started = False
+        for line in item.splitlines():
+            boundary = bool(re.match(r"^\s*#{1,6}\s", line)
+                            or _TABLE_ROW_RX.match(line))
+            if boundary:
+                pending, evidence_started = [], False
+            for sent in re.split(r"(?<=[。！？!?；;])", line):
+                s = sent.strip()
+                if not s:
                     continue
-        if m_claim and m_repro:
-            kind = "mixed"
-        elif m_repro:
-            kind = "repro"
-        else:
-            kind = "success"
-        out.append({"text": s, "kind": kind})
+                # 不再从句首找第一个否定词：那会把「没有异常，已修复」
+                # 整句删掉。两类声明共用主入口已有的子句 / 定语判据。
+                claims = _drop_negated_claims(s, CLAIM_RX)
+                repros = _drop_negated_claims(s, _REPRO_RX)
+                if claims or repros:
+                    kind = ("mixed" if claims and repros else
+                            "repro" if repros else "success")
+                    unit = {"text": s, "kind": kind, "evidence": [],
+                            "claim_count": len(claims) + len(repros)}
+                    out.append(unit)
+                    # 上一组证据字段结束后，新的声明开始自己的归属链。
+                    if evidence_started:
+                        pending = []
+                    pending.append(unit)
+                    evidence_started = False
+                elif _EVIDENCE_FIELD_RX.match(s):
+                    # 字段必须紧邻且只能归属一个声明；无法唯一归属时
+                    # 不把观测复制给多个事项，也不默认借给最后一个。
+                    if len(pending) == 1 and pending[0]["claim_count"] == 1:
+                        pending[0]["evidence"].append(s)
+                    evidence_started = True
+                else:
+                    # 普通说明行不是证据续行，防止越过独立事项借证据。
+                    pending, evidence_started = [], False
+            if boundary:
+                pending, evidence_started = [], False
     return out
 
 
@@ -600,7 +624,7 @@ def _judge_unit(unit, asserted, scan, obs_tokens):
     rs = scan.get("results") or []
     ok = [r for r in rs if not r.get("is_error")]
     err = [r for r in rs if r.get("is_error")]
-    obs = obs_tokens(text)
+    obs = obs_tokens("\n".join([text] + (unit.get("evidence") or [])))
 
     if kind == "mixed":
         # 同一句里既有复现又有完成 —— 无法可靠拆分，保留未确认
@@ -643,7 +667,8 @@ def _backing_state(asserted, scan, obs_tokens):
     """把「发现观测」与「支持当前声明」分开。
 
     返回 kind（互斥）：
-      matched           每个声明单元都有对应证据（逐项，不是"整份报告"）
+      scan_unconfirmed  扫描不可读或不完整，优先按未确认处理
+      matched           每个声明单元都有对应证据（含成功声明）
       partial           部分单元有证据，其他未确认（不得记成已验证）
       stale             有对应，但之后写到了【声明提到的对象】
       write_unconfirmed 有对应，但之后有写操作、无法确认是否影响该对象
@@ -672,12 +697,19 @@ def _backing_state(asserted, scan, obs_tokens):
         ok_obs |= obs_tokens(_signals_text(r))
 
     units = _claim_units(asserted)
-    judged = [_judge_unit(u, asserted, scan, obs_tokens) for u in units]
+    # 扫描质量先于任何匹配：尾部恰好有匹配也不能覆盖「未看完整」事实。
+    scan_why = ("scan-unavailable" if not scan.get("ok") else
+                "scan-truncated" if scan.get("truncated") else None)
+    judged = ([{"kind": "scan_unconfirmed", "why": scan_why} for u in units]
+              if scan_why else
+              [_judge_unit(u, asserted, scan, obs_tokens) for u in units])
     n = len(judged)
     # repro 也是「该单元找到证据」的一种，不能只数 matched
     n_match = sum(1 for j in judged if j["kind"] in ("matched", "repro"))
 
-    if n == 0:
+    if scan_why:
+        kind, why = "scan_unconfirmed", scan_why
+    elif n == 0:
         # 没有可识别的声明单元：沿用原有「是否有观测」的分类
         if any(r.get("signals") for r in ok):
             kind = "generic"
@@ -687,7 +719,9 @@ def _backing_state(asserted, scan, obs_tokens):
             kind = "none"
         why = "no-claim-unit"
     elif n_match == n:
-        kind, why = "matched", ""
+        # 纯复现必须保留专门分类；混合报告仍保留每项的声明与结果类型。
+        kind = "repro" if all(j["kind"] == "repro" for j in judged) else "matched"
+        why = ""
     elif n_match:
         kind, why = "partial", "partial-match"
     elif n >= 2:
@@ -699,7 +733,7 @@ def _backing_state(asserted, scan, obs_tokens):
     # 统计字段（事件与提示用）
     _matched_results = ([r for r in ok
                          if obs_tokens(_signals_text(r)) & claim_obs]
-                        if claim_obs else [])
+                        if claim_obs and not scan_why else [])
     fresh = [r for r in _matched_results if not r.get("writes_after")]
     stale_matched = [r for r in _matched_results if r.get("writes_after")]
     _targets = []
@@ -725,6 +759,9 @@ def _backing_state(asserted, scan, obs_tokens):
         "units": [{"text": u["text"][:80], "kind": u["kind"]}
                   for u in units],
         "unit_kinds": [j["kind"] for j in judged],
+        # 事件记录只接收标量；用短串保留类型，不写入声明或证据正文。
+        "unit_summary": ",".join("%s:%s" % (u["kind"], j["kind"])
+                                 for u, j in zip(units, judged))[:120],
     }
 
 # 否定 / 未来 / 条件语境（3.5.13 补，B2 误报一侧）。
@@ -749,7 +786,7 @@ def _backing_state(asserted, scan, obs_tokens):
 #    修法：只保留未来语态用法 ——「计划」后必须紧跟 是/要/将/会。
 #    代价（如实登记）："计划完成后通知"这类省略句会从"静默漏拦"转为
 #    "可见误拦"——方向与项目「宁可多拦（可见）/不可静默漏报」的取舍一致。
-_NEG_BASE = (r"(不认为|不觉得|算不上|谈不上|不要|别写|别说|不能写|"
+_NEG_BASE = (r"(不认为|不觉得|算不上|谈不上|不要|别写|别说|不能(?:写|说)|"
              r"计划(?=[是要将会])|打算|将要|即将|如果|假如|一旦|"
              r"尚未|还没|没有|无法|未能|不应该|不用)")
 
@@ -1557,6 +1594,14 @@ def main():
 
     claim, level, level_num, risk = analyze(asserted)
 
+    # 3.5.19 修补：复现专门分类必须有真实入口，不能只在辅助函数里可达。
+    # 引用已在入口剥离；否定 / 假设 / 定语继续使用已有判据，不新增词表。
+    explicit_repros = _drop_negated_claims(asserted, _REPRO_RX)
+    claim_from_repro = False
+    if explicit_repros and not _drop_negated_claims(asserted, CLAIM_RX):
+        claim = explicit_repros[0]
+        claim_from_repro = True
+
     # 入口 2（整段式）：词表【没】命中时，仍然给未见表达一条进模型的路。
     #
     # 用户要求原话：「不能让未被词库覆盖的完成表达永远进不了模型」。
@@ -1601,7 +1646,7 @@ def main():
     #    修法：语义来源的 claim 跳过这条词表剔除，直接进入证据检查；
     #    引用/否定/假设的排除由评审层负责（它的提示词里已明确要求），
     #    而"已验证的声明"仍由 has_block + level 检查保护。
-    if claim and not claim_from_semantic \
+    if claim and not claim_from_semantic and not claim_from_repro \
             and not _drop_negated_claims(asserted, CLAIM_RX):
         # ⚠️ X7（2026-09-29 五维验证）：剔除导致放行【也必须留痕】——
         #    红队实测这类静默放行在事后统计里完全不可见（无 stderr、无事件），
@@ -1759,36 +1804,8 @@ def main():
                             % (_wcond or "未运行测试", _facts))
             allow()
 
-        if not _scan.get("ok"):
-            # 读不到 transcript（无路径 / 读失败）→ 不据此指控，但必须留痕
-            record_gate_event("G3", "verification_unobserved",
-                              "allow_unobserved", tool="Stop",
-                              session_id=_sid,
-                              extra={"why": str(_scan.get("why"))[:80],
-                                     "delivery_channel": "additionalContext"})
-            if not retry:
-                notify_once(_sid, "G3:unobserved",
-                            "【G3 生效门】证据块为模型自报等级；%s，无法与已发生的结果对照。\n"
-                            "  ⚠️ 本轮不能写成「已验证通过」。" % _facts)
-            allow()
-
-        if not _rs:
-            if _scan.get("truncated"):
-                # ⚠️ 3.5.19 修补：truncated 【不能】作为通过条件。
-                #    尾部可见范围内没结果，只说明「没看到」，不说明「不存在」。
-                #    因此不记 verified，也不打回 —— 记为未确认。
-                record_gate_event("G3", "evidence_unconfirmed_truncated",
-                                  "allow_unconfirmed", tool="Stop",
-                                  session_id=_sid,
-                                  extra={"truncated": True,
-                                         "delivery_channel": "additionalContext"})
-                if not retry:
-                    notify_once(_sid, "G3:truncated",
-                                "【G3 生效门】transcript 只读了尾部且已截断；%s。\n"
-                                "  ⚠️ 门无法确认本轮结果，按【未确认】处理 ——\n"
-                                "     不是「已验证」，也不是指控。请按事实措辞。"
-                                % _facts)
-                allow()
+        _b = _backing_state(asserted, _scan, obs_tokens)
+        if not _rs and _b["kind"] != "scan_unconfirmed":
             # 整个 transcript 都在可见范围内，却一条工具结果都没有 ——
             # 这时"L3 端到端已验证"没有任何可核对的来源。
             # 不是按关键词指控，而是指出【事实层面缺少结果】。
@@ -1807,10 +1824,8 @@ def main():
                 "  写成「已验证通过」。" % (claim.group(1), _facts),
                 "evidence_without_observed_result")
 
-        _b = _backing_state(asserted, _scan, obs_tokens)
-
         if _b["kind"] == "matched":
-            # 唯一「安静放行」：声明里的观测与成功结果对上了，且之后无写操作。
+            # 各声明分别有依据；混合报告的复现 / 成功类型保留在事件摘要。
             record_gate_event("G3", "verified_by_observed_results",
                               "allow_with_observed_results", tool="Stop",
                               session_id=_sid,
@@ -1820,6 +1835,7 @@ def main():
                                      "claim_obs": ",".join(_b["claim_obs"])[:80],
                                      "units_total": _b.get("units_total") or 0,
                                      "units_matched": _b.get("units_matched") or 0,
+                                     "unit_summary": _b["unit_summary"],
                                      "errors": int(_scan.get("errors") or 0),
                                      "truncated": bool(_scan.get("truncated")),
                                      "digests": [r.get("digest")
@@ -1832,11 +1848,21 @@ def main():
             record_gate_event("G3", "verified_by_expected_failure",
                               "allow_expected_failure", tool="Stop",
                               session_id=_sid,
-                              extra={"errors": _b["err_results"]})
+                              extra={"errors": _b["err_results"],
+                                     "units_total": _b["units_total"],
+                                     "unit_summary": _b["unit_summary"]})
             allow()
 
         # 其余情况：允许交付，但【不记为已验证】。
-        if _b["kind"] == "partial":
+        if _b["kind"] == "scan_unconfirmed":
+            if _b["why"] == "scan-truncated":
+                _rule, _key = ("evidence_unconfirmed_truncated", "truncated")
+                _why = ("transcript 扫描已截断；即使尾部有匹配观测，"
+                        "也不能确认完整上下文，因此本轮保持未确认")
+            else:
+                _rule, _key = ("verification_unobserved", "unobserved")
+                _why = "未能读取 transcript，无法与已经发生的结果对照"
+        elif _b["kind"] == "partial":
             # ⚠️ 3.5.19 修补（混合报告）：部分声明单元有证据，其他没有。
             #    不能把「局部匹配」记成「整份报告已验证」。
             _rule, _key = ("report_partially_supported", "partial")
@@ -1890,6 +1916,7 @@ def main():
                                  "claim_obs": ",".join(_b["claim_obs"])[:80],
                                  "units_total": _b.get("units_total") or 0,
                                  "units_matched": _b.get("units_matched") or 0,
+                                 "unit_summary": _b["unit_summary"],
                                  "truncated": bool(_scan.get("truncated")),
                                  "delivery_channel": "additionalContext"})
         if not retry:
@@ -1927,7 +1954,7 @@ def main():
         #    复现分支就被关掉，转而走普通成功观测路径，永远查不到
         #    对应的失败结果。现在复现声明【优先】走失败结果判断；
         #    匹配不足时记未确认，也不再落到成功观测路径。
-        _repro_inline = bool(_REPRO_RX.search(asserted))
+        _repro_inline = bool(_drop_negated_claims(asserted, _REPRO_RX))
         if (_inline or _repro_inline) and effective_risk != "高":
             # ⚠️ 3.5.19 修补：正文里写「exit code 0」不能自行成为证据。
             #    修前这里只搜正文，于是「本会话零工具结果、只写一句 200」
@@ -1960,6 +1987,7 @@ def main():
                            "observed": _observed,
                            "results": len(_iall),
                            "units_total": _ib.get("units_total") or 0,
+                           "unit_summary": _ib["unit_summary"],
                            "delivery_channel": "additionalContext"})
                 if not retry:
                     notify_once(_isid, "G3:inline-ok",
@@ -1975,6 +2003,7 @@ def main():
                     "allow_by_inline_evidence", tool="Stop", session_id=_isid,
                     extra={"risk": effective_risk, "observed": _observed,
                            "failed_runs": _ib["err_results"],
+                           "unit_summary": _ib["unit_summary"],
                            "delivery_channel": "additionalContext"})
                 if not retry:
                     notify_once(_isid, "G3:inline-repro",
@@ -1998,9 +2027,14 @@ def main():
                            "backing": _ikind,
                            "units_total": _ib.get("units_total") or 0,
                            "units_matched": _ib.get("units_matched") or 0,
+                           "unit_summary": _ib["unit_summary"],
                            "delivery_channel": "additionalContext"})
                 if not retry:
-                    if _ikind == "partial":
+                    if _ikind == "scan_unconfirmed":
+                        _why = ("transcript 扫描已截断，无法确认完整上下文"
+                                if _ib["why"] == "scan-truncated" else
+                                "未能读取 transcript，无法与已经发生的结果对照")
+                    elif _ikind == "partial":
                         _why = ("这份报告里有 %d 项当前声明，只有 %d 项找到"
                                 "对应证据；其余未确认"
                                 % (_ib.get("units_total") or 0,

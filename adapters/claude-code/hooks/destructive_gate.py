@@ -554,6 +554,103 @@ _HEREDOC_RX = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _HEREDOC_EXEC_RX = re.compile(r"(\$\(|`|\$\{)")
 
 
+def _heredoc_simple_tokens(text, allow_comment=False):
+    """只识别字面词和普通输出重定向；不确定的 shell 语法返回 None。
+
+    保留词与操作符的区别：引号内或反斜杠转义的 |;& 只是参数内容。
+    不用 shlex 拆完再猜标点身份，也不把 Windows 路径的反斜杠当路径分隔符。
+    这不是通用 shell 解析器：变量/命令替换、管道、连接符和输入重定向
+    都不获得文档豁免，仍由原危险规则检查。
+    """
+    tokens, word = [], []
+    quote, started = None, False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                word.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            if i + 1 >= len(text) or text[i + 1] in "\r\n":
+                return None               # 不推断跨行续接
+            nxt = text[i + 1]
+            if quote == '"' and nxt not in '\\$`"':
+                word.append(ch)           # 双引号中 \p 等保留反斜杠
+                i += 1
+                continue
+            word.append(nxt)
+            started = True
+            i += 2
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch in "$`":
+                return None
+            else:
+                word.append(ch)
+            i += 1
+            continue
+        if ch in "'\"":
+            quote, started = ch, True
+        elif ch.isspace():
+            if started:
+                tokens.append(("word", "".join(word)))
+                word, started = [], False
+        elif ch == "#" and not started:
+            if not allow_comment:
+                return None               # heredoc 标记不能来自注释
+            break
+        elif ch in "$`|;&()<{}":
+            return None
+        elif ch == ">":
+            if started:
+                tokens.append(("word", "".join(word)))
+                word, started = [], False
+            op = ">>" if text[i:i + 2] == ">>" else ">"
+            tokens.append(("redirect", op))
+            i += len(op)
+            continue
+        else:
+            word.append(ch)
+            started = True
+        i += 1
+    if quote:
+        return None
+    if started:
+        tokens.append(("word", "".join(word)))
+    return tokens
+
+
+def _heredoc_doc_consumer(head, tail):
+    """仅确认一个直接的内容接收命令；包装/复合命令不豁免。"""
+    before = _heredoc_simple_tokens(head)
+    after = _heredoc_simple_tokens(tail, allow_comment=True)
+    if not before or after is None or before[0][0] != "word":
+        return None
+    consumer = before[0][1]
+    if consumer not in _HEREDOC_DOC_CMDS:
+        return None
+    # 不猜显式 heredoc 文件描述符；这里只确认默认标准输入的直接接收者。
+    if re.search(r"(?:^|[ \t])\d+$", head):
+        return None
+    needs_target = False
+    for kind, value in (before + after)[1:]:
+        if kind == "redirect":
+            if needs_target:
+                return None
+            needs_target = True
+        else:
+            if needs_target and not value:
+                return None
+            needs_target = False
+    return None if needs_target else consumer
+
+
 def _heredoc_doc_ranges(cmd):
     """返回 heredoc 正文的 (start, end) 区间 —— 仅限【不会被执行】的正文。
 
@@ -561,10 +658,11 @@ def _heredoc_doc_ranges(cmd):
        没有看分隔符是否加引号。`cat <<EOF` 里的 `$(rm -rf /)` 会被 bash
        先做命令替换再传给 cat —— 正文不是"文档"，是【会执行的内容】。
        现在只有下面三条同时成立才豁免：
-         · 命令位是 cat/tee/printf/echo；
+         · 单一命令直接由 cat/tee/printf/echo 接收；参数和普通 > / >>
+           目标可带引号/转义，但不推断管道、连接、包装或替换的执行归属；
          · 分隔符【带引号】（`<<'EOF'` / `<<"EOF"`）—— 或正文里没有
            命令替换形态；
-         · opener 行没有管道（`cat <<EOF | sh` 整段会执行）。
+         · 分隔符独立、正文有明确终止行，没有跨行包装语法。
        判不出的形态一律不豁免（宁可多检查，不扩大文档豁免）。
     """
     if not cmd or "<<" not in cmd:
@@ -580,27 +678,33 @@ def _heredoc_doc_ranges(cmd):
         ln = lines[i]
         m = _HEREDOC_RX.search(ln)
         if not m:
+            if _heredoc_simple_tokens(ln, allow_comment=True) is None:
+                return ranges             # 后续行可能仍属于包装/引用，停止豁免
             i += 1
             continue
-        head = ln[:m.start()].strip()
+        head = ln[:m.start()]
         tail = ln[m.end():]
-        # ⚠️ 3.5.19 修补：heredoc 的正文交给【这条命令行里最后一个命令】。
-        #    修前只看整行第一个词：`cat | sh <<'EOF'` 会被当成 cat 的输入，
-        #    于是正文获得文档豁免 —— 但实际执行它的是 sh。
-        #    分隔符加引号只影响正文是否展开，不代表正文不会被执行。
-        _cmds = [c.strip() for c in re.split(r"[|;&]", head) if c.strip()]
-        consumer = ""
-        if _cmds:
-            consumer = _cmds[-1].split()[0].strip("'\"")
-        if consumer not in _HEREDOC_DOC_CMDS or "|" in tail:
-            i += 1
-            continue
+        # 3.5.19 修补：不能按原始 |;& 拆字符串后取末段。
+        # `sh -s 'label; cat'` 的接收者仍是 sh；引号内的 cat 只是参数。
+        # 同理 `cat > 'notes; draft.md'` 的分号属于文件名，不能制造新命令。
+        # 不支持的组合保留原检查；不要通过猜测扩大正文豁免范围。
+        if (tail and not tail[0].isspace() and tail[0] != ">") or \
+                _heredoc_doc_consumer(head, tail) is None:
+            return ranges
         tag = m.group(2)
         start = offs[i] + len(ln)
         j = i + 1
-        while j < len(lines) and lines[j].strip() != tag:
+        strip_tabs = ln[m.start():].startswith("<<-")
+        while j < len(lines):
+            end_line = lines[j].rstrip("\r\n")
+            if strip_tabs:
+                end_line = end_line.lstrip("\t")
+            if end_line == tag:
+                break
             j += 1
-        end = offs[j] if j < len(lines) else len(cmd)
+        if j == len(lines):
+            return ranges                 # 未找到确切结束位置，不豁免剩余文本
+        end = offs[j]
         body = cmd[start:end]
         quoted = bool(m.group(1))          # 分隔符带引号 = 不做展开
         if not quoted and _HEREDOC_EXEC_RX.search(body):

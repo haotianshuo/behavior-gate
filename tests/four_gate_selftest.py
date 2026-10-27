@@ -220,16 +220,34 @@ def main():
                   tmp)
     check("没有完成措辞时放行", c == 0, "exit=%d" % c)
 
+    retry_sid = sid3 + "-retry"
     c, o, e = run("effect_gate.py",
-                  {"session_id": sid3, "stop_hook_active": True,
+                  {"session_id": retry_sid, "stop_hook_active": True,
                    "last_assistant_message": "已经修复了。"},
                   tmp)
-    # ⚠️ 断言已修正（#43）：修前这里断言"无条件放行"，
-    #    而那正是「原样重发即可通过」的缺陷。
-    #    现在的语义是：重试仍放行（防死循环），但【放行必须可见】。
-    check("重试轮次放行，且放行可见",
-          c == 0 and "可见的放行" in e,
-          "exit=%d stderr=%s" % (c, e[:200]))
+    # 3.5.19 已将重试改为「放行 + 事件留痕」，不再追加模型上下文。
+    # stderr 含某句文案不能证明宿主可见；核对实际输出协议和独立会话事件，
+    # 同时防止退回无痕放行、重复阻断或反复追加提醒。
+    try:
+        retry_reply = json.loads(o) if o.strip() else {}
+        with open(os.path.join(tmp, "gate-events.jsonl"), encoding="utf-8") as f:
+            retry_events = [json.loads(line) for line in f if line.strip()]
+        retry_hso = retry_reply.get("hookSpecificOutput") or {}
+        retry_output_ok = (retry_reply.get("decision") != "block"
+                           and retry_reply.get("continue") is not False
+                           and retry_hso.get("permissionDecision") != "deny"
+                           and not retry_hso.get("additionalContext"))
+        retry_recorded = any(
+            ev.get("session") == retry_sid and ev.get("gate_id") == "G3"
+            and ev.get("rule_id") == "missing_effect_evidence"
+            and ev.get("decision") == "stop_feedback_retry"
+            for ev in retry_events)
+    except (OSError, ValueError, AttributeError):
+        retry_output_ok, retry_recorded = False, False
+    check("重试轮次放行、记录不合规事件且不重复追加上下文",
+          c == 0 and retry_output_ok and retry_recorded,
+          "exit=%d recorded=%s stdout=%s stderr=%s"
+          % (c, retry_recorded, o[:120], e[:120]))
 
     # --- #43 回归用例：G3 提示模板自己要求的字段，不能成为绕过门的钥匙 ---
     #

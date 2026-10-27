@@ -6,9 +6,11 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#运行要求)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> 当前版本：**V3.5.19** ｜ 2026-10-26
+> 当前版本：**V3.5.19** ｜ 2026-10-27 源码修补，尚未发布为新的发行包
 
 [下载发行包](https://github.com/haotianshuo/behavior-gate/releases/latest) · [快速开始](#快速开始) · [安装与升级](install.md) · [本版更新](docs/releases/v3.5.19.md) · [参与贡献](CONTRIBUTING.md)
+
+本分支基于 `v3.5.19-notes.1` 修补声明提取、相邻证据关联、截断降级、复现分类与 heredoc 文档豁免。版本号保留 `3.5.19`，具体内容由 `SOURCE_IDENTITY.json` 中的快照区分；现有 Release 附件不随分支修改自动更新。详见[本轮源码修补说明](docs/releases/v3.5.19-review-fixes.md)。
 
 ## 为什么使用 BehaviorGate
 
@@ -272,7 +274,7 @@ python tools/preflight_release.py
 <details>
 <summary>维护者：测试套件与计数</summary>
 
-当前二十套测试中，19 套功能测试合计 **517 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
+当前二十一套测试中，20 套功能测试合计 **545 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
 
 | 测试 | 用例数 |
 |---|---:|
@@ -295,9 +297,10 @@ python tools/preflight_release.py
 | `tests/g7_state_disclosure_test.py` | 16 |
 | `tests/gate_stats_cohort_test.py` | 16 |
 | `tests/gate_stats_repeats_test.py` | 11 |
+| `tests/evidence_heredoc_regression_test.py` | 28 |
 | `tests/doc_consistency_test.py` | 20，另计 |
 
-构造用例、真实会话回归和在线层的证据性质不同。[CHANGELOG.md](CHANGELOG.md) 保留 140 项真实问题及修复记录；贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+构造用例、真实会话回归和在线层的证据性质不同。[CHANGELOG.md](CHANGELOG.md) 保留 146 项问题及修复记录；贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 </details>
 

@@ -71,6 +71,9 @@ jobs:
       - name: G3 归属误报与漏拦回归
         run: python tests/g3_attribution_regression_test.py
 
+      - name: G3 证据关联与 G5 heredoc 修补回归
+        run: python tests/evidence_heredoc_regression_test.py
+
       - name: 语义意图（G7）
         run: python tests/semantic_intent_test.py
 
