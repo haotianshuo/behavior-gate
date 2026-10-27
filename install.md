@@ -192,7 +192,7 @@ python tools/preflight_release.py
 不要同时启动多个全量预检，以免资源竞争干扰耗时敏感测试。源码与包内回归通过，不等于所有真实宿主和业务场景都通过。
 
 <details>
-<summary>完整测试清单：20 套测试，功能回归 517 项，文档检查另计</summary>
+<summary>完整测试清单：21 套测试，功能回归 545 项，文档检查另计</summary>
 
 | 脚本 | 用例 |
 | --- | ---: |
@@ -215,6 +215,7 @@ python tools/preflight_release.py
 | `tests/g7_state_disclosure_test.py` | 16 |
 | `tests/gate_stats_cohort_test.py` | 16 |
 | `tests/gate_stats_repeats_test.py` | 11 |
+| `tests/evidence_heredoc_regression_test.py` | 28 |
 | `tests/doc_consistency_test.py` | 20，单独计数 |
 
 在线模型测试默认不启用；以实际输出区分执行、跳过与已知未解决项。

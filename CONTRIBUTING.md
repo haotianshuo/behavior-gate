@@ -17,7 +17,7 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **517 项** = 19 套功能测试 517；检查器自身 20 项另计）：
+提交前必须全部通过（共 **545 项** = 20 套功能测试 545；检查器自身 20 项另计）：
 
 ```bash
 python tests/four_gate_selftest.py        # 57/57
@@ -39,6 +39,7 @@ python tests/semantic_g3_test.py          # 2/2    ← G3 语义归属（在线�
 python tests/g7_state_disclosure_test.py  # 16/16  ← 状态故障披露
 python tests/gate_stats_cohort_test.py    # 16/16  ← 统计工具 cohort 口径
 python tests/gate_stats_repeats_test.py   # 11/11  ← 统计工具重复触发口径
+python tests/evidence_heredoc_regression_test.py  # 28  ← G3 证据与 G5 heredoc 修补
 python tests/doc_consistency_test.py      # 20/20
 ```
 
@@ -133,7 +134,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 517 项测试全部通过
+[ ] 545 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 如改了 hook，已刷新源身份（tools/source_identity.py --write）

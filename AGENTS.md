@@ -34,7 +34,7 @@
 ├─ tools/
 │   ├─ verify_deploy.py            部署校验
 │   └─ verify_portable.py          可移植性校验
-└─ tests/                          二十套测试（517 项，用 ls tests/*.py 枚举）
+└─ tests/                          二十一套测试（545 项，用 ls tests/*.py 枚举）
 ```
 
 ---
@@ -48,7 +48,7 @@ python install.py
 # 应用安装
 python install.py --apply
 
-# 全部测试（517 项 = 19 套功能测试 517；检查器自身 20 项另计，提交前必须通过）
+# 全部测试（545 项 = 20 套功能测试 545；检查器自身 20 项另计，提交前必须通过）
 # ⚠️ 不要照抄这段清单 —— 用 glob 枚举，否则新增套件会被漏掉：
 #     ls tests/*.py
 python tests/four_gate_selftest.py        # 57
@@ -70,6 +70,7 @@ python tests/semantic_g3_test.py          # 2   ← G3 语义归属（在线层�
 python tests/g7_state_disclosure_test.py  # 16
 python tests/gate_stats_cohort_test.py    # 16
 python tests/gate_stats_repeats_test.py   # 11  ← 统计工具重复触发口径
+python tests/evidence_heredoc_regression_test.py  # 28  ← G3 证据与 G5 heredoc 修补
 python tests/doc_consistency_test.py      # 20/20  ← 会递归跑上面全部，并核对文档数字
 
 # 部署校验
@@ -130,7 +131,7 @@ python tools/verify_deploy.py
 
 ## 测试要求
 
-**任何改动都必须保证全部套件通过（当前 517 项）。**
+**任何改动都必须保证全部套件通过（当前 545 项）。**
 ⚠️ 不要照抄某个数字或清单 —— 用 `ls tests/*.py` 枚举，
    否则新增的套件会被漏跑（真实发生过：照旧清单跑，漏了 4 个套件）。
 
