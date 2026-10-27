@@ -172,8 +172,11 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
                        "从未发生过"，调用方必须区别对待）
       results   [{"tool_use_id","tool","is_error","signals":[...],
                   "chars":N,"digest":"…",
-                  "after_write":bool,      # 该结果之后是否有【已成功】的写
-                  "writes_after":[目标短串]}]
+                  "after_write":bool,      # 该结果之后是否有写（任一状态）
+                  "after_write_confirmed":bool,
+                  "after_write_possible":bool,
+                  "writes_after":[{"targets":[短串],
+                                   "state":"confirmed|possible|pending"}]}]
       errors    失败结果数
 
     ⚠️ 写操作只在【tool_result 存在且成功】时才算发生；
@@ -207,11 +210,14 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
         lines = lines[-max_lines:]
 
     tool_names = {}
-    # 按出现顺序同时收集「工具结果」与「已确认发生的写操作」。
-    # 写操作只在它的 tool_result 存在且成功时才入队 ——
-    # 「请求过写入」不等于「写入已经成功」。
+    # 按出现顺序同时收集「工具结果」与「写操作」。
+    # ⚠️ 3.5.19 修补：写操作有三种状态，不能只有"成功"和"没发生"：
+    #   confirmed —— tool_result 存在且成功
+    #   possible  —— tool_result 存在但失败（命令可能已改了文件才失败）
+    #   pending   —— 有写请求但没有 tool_result（无法确认是否执行）
+    # 「请求过写入」仍不等于「写入已经成功」，但也不能直接排除。
     seq = []
-    pending_writes = {}          # tool_use_id -> [(target, tool), ...]
+    write_idx = {}               # tool_use_id -> seq 下标
     for ln in lines:
         try:
             d = json.loads(ln)
@@ -230,7 +236,9 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
                     tool_names[tid] = name
                     _tg = _write_targets(name, b.get("input") or {})
                     if _tg:
-                        pending_writes[tid] = _tg
+                        write_idx[tid] = len(seq)
+                        seq.append(("write", {"targets": _tg,
+                                              "state": "pending"}))
             elif t == "tool_result":
                 tid = b.get("tool_use_id") or ""
                 out = _result_text(b)
@@ -242,10 +250,13 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
                         sigs.append(s)
                     if len(sigs) >= 4:
                         break
-                # 写入已成功 → 记一条 write 事件，位置在这条 result 之前，
-                # 反向标记时不会把它算成「这条结果之后的修改」。
-                if tid and not is_err and tid in pending_writes:
-                    seq.append(("write", pending_writes.pop(tid)))
+                # 更新这条写操作的状态。位置在 tool_use 处，不在这条
+                # result 之后 —— 反向标记时不会把它算成自己的后续修改。
+                # ⚠️ 失败不等于没写入：命令可能改完文件才返回非零，
+                #    所以 command 失败记 possible，而不是丢弃。
+                if tid in write_idx:
+                    seq[write_idx[tid]][1]["state"] = (
+                        "possible" if is_err else "confirmed")
                 seq.append(("result", {
                     "tool_use_id": tid,
                     "tool": tool_names.get(tid, "?"),
@@ -259,16 +270,20 @@ def scan_session(transcript_path, max_bytes=524288, max_lines=800,
             truncated = True     # 提前停止 = 扫描不完整，必须如实记录
             break
 
-    # 反向标记：该结果【之后】有哪些已成功发生的写操作。
+    # 反向标记：该结果【之后】有哪些写操作，以及它们的确定程度。
     # ⚠️ 有写操作 ≠ 结果无效 —— 是否能判过期取决于写目标是否与声明相关，
-    #    这一步交给 G3；这里只如实记录目标，不替它下结论。
+    #    这一步交给 G3；这里只如实记录目标与状态，不替它下结论。
     later = []
     for kind, payload in reversed(seq):
         if kind == "write":
-            later = (list(payload) + later)[:6]
+            later = ([dict(payload)] + later)[:6]
         else:
-            payload["writes_after"] = list(later)
+            payload["writes_after"] = [dict(w) for w in later]
             payload["after_write"] = bool(later)
+            payload["after_write_confirmed"] = any(
+                w.get("state") == "confirmed" for w in later)
+            payload["after_write_possible"] = any(
+                w.get("state") in ("possible", "pending") for w in later)
 
     results = [p for k, p in seq if k == "result"]
     if len(results) > max_results:
@@ -291,7 +306,7 @@ def summarize(scan):
     concrete = [r for r in rs if r.get("signals")]
     ok_runs = [r for r in rs if not r.get("is_error")]
     stale = [r for r in concrete if r.get("after_write")]
-    extra = ("，其中 %d 条之后还有【已成功的】写操作" % len(stale)
+    extra = ("，其中 %d 条之后还有写操作（已确认或可能）" % len(stale)
              if stale else "")
     return ("工具结果 %d 条（成功 %d / 失败 %d），其中 %d 条含可核对观测%s"
             % (len(rs), len(ok_runs), int(scan.get("errors") or 0),

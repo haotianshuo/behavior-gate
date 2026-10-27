@@ -583,10 +583,16 @@ def _heredoc_doc_ranges(cmd):
             i += 1
             continue
         head = ln[:m.start()].strip()
-        words = head.split()
-        first = words[0].strip("'\"") if words else ""
         tail = ln[m.end():]
-        if first not in _HEREDOC_DOC_CMDS or "|" in tail:
+        # ⚠️ 3.5.19 修补：heredoc 的正文交给【这条命令行里最后一个命令】。
+        #    修前只看整行第一个词：`cat | sh <<'EOF'` 会被当成 cat 的输入，
+        #    于是正文获得文档豁免 —— 但实际执行它的是 sh。
+        #    分隔符加引号只影响正文是否展开，不代表正文不会被执行。
+        _cmds = [c.strip() for c in re.split(r"[|;&]", head) if c.strip()]
+        consumer = ""
+        if _cmds:
+            consumer = _cmds[-1].split()[0].strip("'\"")
+        if consumer not in _HEREDOC_DOC_CMDS or "|" in tail:
             i += 1
             continue
         tag = m.group(2)

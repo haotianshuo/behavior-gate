@@ -424,10 +424,13 @@ def analyze(msg):
 # 原文还明确说本轮没做浏览器验证。这是归属误拦，不是纠错。
 #
 # 判据刻意保守，且只用于【不拦截】这一侧：
-#   · 同一句里要有完成词，并且【历史标记出现在完成词之前】；
-#   · 历史标记 = 明确日期，或强指代（已有/上一轮/此前/上次/原报告…）；
+#   · 同一句里要有完成词，并且【强指代出现在完成词之前】；
+#   · 强指代 = 已有结果 / 已有记录 / 已有修复 / 上一轮 / 上一次 / 上次 /
+#     前一轮 / 原报告 / 历史记录（日期与「此前 / 之前」不算，见下）；
 #   · 同一句里出现「现在 / 本轮 / 这次 / 刚刚」等当前语态 → 一律不算历史，
 #     继续按当前声明处理（避免「我之前的判断错了，现已修复」被放过）。
+#   ⚠️ 日期 / HH:MM 不参与判定：「10/25 的测试通过了」不是转述，
+#      「5/10 项通过」也不是日期；「此前失败的两项已修复」是本轮声明。
 # ⚠️ 边界：这是行内字符串判据，不是归属理解。没有显式标记的历史引用
 #    仍由语义评审判断（见 review_unit 的 _CLAIM_PROMPT）。
 #    命中会记事件并打印提示，不是静默放行。
@@ -529,52 +532,136 @@ def _signals_text(r):
     return " ".join(r.get("signals") or [])
 
 
-def _write_relevance(asserted, targets):
+def _write_relevance(asserted, writes):
     """写操作是否与声明提到的对象相关。
 
+    writes 的元素是 {"targets": [...], "state": "confirmed|possible|pending"}。
     True  = 写目标的文件名出现在声明里 → 相关修改
     None  = 判不出（目标是 `<file>` 或声明里没提任何具体文件）
     False = 看得到的目标都不在声明里（仍不足以证明无关）
     """
-    if not targets:
+    if not writes:
         return False
     a = asserted or ""
     known = False
-    for t in targets:
-        base = str(t).split("/")[-1]
-        if base and base != "<file>":
-            known = True
-            if base in a:
-                return True
+    for w in writes:
+        for t in (w.get("targets") or []):
+            base = str(t).split("/")[-1]
+            if base and base != "<file>":
+                known = True
+                if base in a:
+                    return True
     return False if known else None
+
+
+def _claim_units(text):
+    """把正文拆成【需要有证据支持的当前声明】单元。
+
+    ⚠️ 3.5.19 修补（混合报告）：修前整段正文只要含复现声明就走复现分支，
+       一个失败结果匹配后整段报告放行 —— 后面的「修复已完成，HTTP 200」
+       没有独立核对。现在按句拆开，逐项判断。
+
+    只做句子级切分，不做语义解析：
+      · 复现类句子 → kind="repro"
+      · 完成 / 通过类句子 → kind="success"
+      · 同一句同时含两类 → kind="mixed"（无法可靠拆分 → 未确认）
+      · 否定 / 假设语境里的完成词不算当前声明（复用既有 NegEx 判据）
+    """
+    out = []
+    for sent in re.split(r"(?<=[。！？!?；;\n])", text or ""):
+        s = sent.strip()
+        if not s:
+            continue
+        m_claim = CLAIM_RX.search(s)
+        m_repro = _REPRO_RX.search(s)
+        if not m_claim and not m_repro:
+            continue
+        if m_claim:
+            spans = _negation_spans(NEGATED_CLAIM_CTX, s)
+            neg = _last_negation_in(spans, 0, m_claim.start())
+            if neg is not None and not _negation_scope_closed(
+                    neg, s, m_claim.start()):
+                if not m_repro:
+                    continue
+        if m_claim and m_repro:
+            kind = "mixed"
+        elif m_repro:
+            kind = "repro"
+        else:
+            kind = "success"
+        out.append({"text": s, "kind": kind})
+    return out
+
+
+def _judge_unit(unit, asserted, scan, obs_tokens):
+    """判断一个声明单元有没有对应证据。只看字面观测，不做语义理解。"""
+    kind = unit.get("kind")
+    text = unit.get("text") or ""
+    rs = scan.get("results") or []
+    ok = [r for r in rs if not r.get("is_error")]
+    err = [r for r in rs if r.get("is_error")]
+    obs = obs_tokens(text)
+
+    if kind == "mixed":
+        # 同一句里既有复现又有完成 —— 无法可靠拆分，保留未确认
+        return {"kind": "unmatched", "why": "mixed-claim", "obs": sorted(obs)}
+    if kind == "repro":
+        if not obs:
+            return {"kind": "repro_unconfirmed", "why": "no-observable",
+                    "obs": []}
+        hit = [r for r in err if obs_tokens(_signals_text(r)) & obs]
+        if hit:
+            return {"kind": "repro", "why": "", "obs": sorted(obs)}
+        return {"kind": "repro_unconfirmed", "why": "no-matching-failure",
+                "obs": sorted(obs)}
+
+    # success
+    if not obs:
+        if any(r.get("signals") for r in ok):
+            return {"kind": "generic", "why": "no-observable", "obs": []}
+        if any(r.get("signals") for r in err):
+            return {"kind": "failed_only", "why": "no-observable", "obs": []}
+        return {"kind": "none", "why": "no-observable", "obs": []}
+    hit_any = [r for r in ok if obs_tokens(_signals_text(r)) & obs]
+    fresh = [r for r in hit_any if not r.get("writes_after")]
+    if fresh:
+        return {"kind": "matched", "why": "", "obs": sorted(obs)}
+    if hit_any:
+        writes = [w for r in hit_any for w in (r.get("writes_after") or [])]
+        conf = [w for w in writes if w.get("state") == "confirmed"]
+        rel = _write_relevance(asserted, conf) if conf else None
+        if conf and rel is True:
+            return {"kind": "stale", "why": "related-write",
+                    "obs": sorted(obs)}
+        # 只有失败 / 未完成的写，或无法确认写的是不是同一对象
+        return {"kind": "write_unconfirmed", "why": "write-unconfirmed",
+                "obs": sorted(obs)}
+    return {"kind": "unmatched", "why": "not-found", "obs": sorted(obs)}
 
 
 def _backing_state(asserted, scan, obs_tokens):
     """把「发现观测」与「支持当前声明」分开。
 
     返回 kind（互斥）：
-      matched          声明里的观测在【成功结果】里找到对应，
-                       且那条结果之后没有写操作
-      stale            找到对应，但之后写到了【声明提到的对象】
-      write_unconfirmed 找到对应，但之后有写操作、无法确认是否影响该对象
-      unmatched        声明里有具体观测，结果里找不到对应（可能被截断）
-      repro            声明是「已复现/预期失败」，且声明里的可核对特征
-                       （错误码 / 退出码）出现在失败结果里
+      matched           每个声明单元都有对应证据（逐项，不是"整份报告"）
+      partial           部分单元有证据，其他未确认（不得记成已验证）
+      stale             有对应，但之后写到了【声明提到的对象】
+      write_unconfirmed 有对应，但之后有写操作、无法确认是否影响该对象
+      unmatched         声明里有具体观测，结果里找不到对应（可能被截断）
+      repro             复现声明的错误特征出现在失败结果里
       repro_unconfirmed 复现类声明无法与具体失败结果关联（未确认）
-      generic          有成功结果，但没有任何具体观测能与声明对齐
-      failed_only      只有失败结果，且声明不是复现类
-      none             没有任何可核对观测
+      generic           有成功结果，但没有任何具体观测能与声明对齐
+      failed_only       只有失败结果，且声明不是复现类
+      none              没有任何可核对观测
 
-    ⚠️ 3.5.19 修补：
-      · 修前只要有一条 matched 结果 stale 就判整条 stale —— 于是
-        「旧结果过期、后来重新取得有效结果」会被否定。现在先看 fresh：
-        存在 after_write 为空的 matched → matched。
-      · 写操作是否让结果失效，取决于它改的是不是同一个对象；
-        判不出时记 write_unconfirmed（未确认），不直接判过期。
-      · repro 要求失败结果【含可核对观测】，不能拿任意失败凑证据。
+    ⚠️ 3.5.19 修补（混合报告）：
+      修前整段正文只要含复现声明就整体走复现分支；一个失败结果匹配后，
+      同段里「修复已完成 / 全部通过」等当前声明不再单独核对。
+      现在按句拆成单元、逐项判断；部分匹配记 partial，日志与提示
+      分别说明「哪些匹配、哪些未确认」，不把部分匹配写成整份已验证。
 
-    ⚠️ 本函数不做语义理解：只比对字面观测，不判断对象/操作是否同一件事。
-       因此 matched 也只表示「观测可对照」，不表示「结论为真」。
+    ⚠️ 本函数不做语义理解：只比对字面观测，不判断对象 / 操作是否同一件事。
+       相同错误码 / 退出码只证明字面一致。matched 只表示「观测可对照」。
     """
     rs = scan.get("results") or []
     ok = [r for r in rs if not r.get("is_error")]
@@ -583,56 +670,62 @@ def _backing_state(asserted, scan, obs_tokens):
     ok_obs = set()
     for r in ok:
         ok_obs |= obs_tokens(_signals_text(r))
-    matched = [r for r in ok if obs_tokens(_signals_text(r)) & claim_obs] \
-        if claim_obs else []
-    fresh = [r for r in matched if not r.get("writes_after")]
-    stale_matched = [r for r in matched if r.get("writes_after")]
+
+    units = _claim_units(asserted)
+    judged = [_judge_unit(u, asserted, scan, obs_tokens) for u in units]
+    n = len(judged)
+    # repro 也是「该单元找到证据」的一种，不能只数 matched
+    n_match = sum(1 for j in judged if j["kind"] in ("matched", "repro"))
+
+    if n == 0:
+        # 没有可识别的声明单元：沿用原有「是否有观测」的分类
+        if any(r.get("signals") for r in ok):
+            kind = "generic"
+        elif any(r.get("signals") for r in err):
+            kind = "failed_only"
+        else:
+            kind = "none"
+        why = "no-claim-unit"
+    elif n_match == n:
+        kind, why = "matched", ""
+    elif n_match:
+        kind, why = "partial", "partial-match"
+    elif n >= 2:
+        kind, why = "unmatched", "multi-none"
+    else:
+        kind = judged[0]["kind"]
+        why = judged[0]["why"]
+
+    # 统计字段（事件与提示用）
+    _matched_results = ([r for r in ok
+                         if obs_tokens(_signals_text(r)) & claim_obs]
+                        if claim_obs else [])
+    fresh = [r for r in _matched_results if not r.get("writes_after")]
+    stale_matched = [r for r in _matched_results if r.get("writes_after")]
     _targets = []
     for r in stale_matched:
         _targets.extend(r.get("writes_after") or [])
     relevance = _write_relevance(asserted, _targets) if stale_matched else False
-    repro = bool(_REPRO_RX.search(asserted or ""))
+    repro = any(u.get("kind") in ("repro", "mixed") for u in units)
 
-    if repro:
-        # ⚠️ 3.5.19 修补（第二次）：修前只要「有复现声明 + 会话里有一条
-        #    带观测的失败结果」就记 repro —— 但「有失败信息」不等于
-        #    「就是这个问题的失败信息」。现在要求声明里的可核对特征
-        #    （错误码 / 退出码）出现在【失败结果】里；声明里没有可核对
-        #    特征时无法关联，记为未确认（repro_unconfirmed），不当证据。
-        if claim_obs:
-            _err_hit = [r for r in err
-                        if obs_tokens(_signals_text(r)) & claim_obs]
-            kind = "repro" if _err_hit else "repro_unconfirmed"
-        else:
-            kind = "repro_unconfirmed"
-    elif claim_obs:
-        if fresh:
-            kind = "matched"
-        elif stale_matched:
-            kind = "stale" if relevance is True else "write_unconfirmed"
-        else:
-            kind = "unmatched"
-    elif any(r.get("signals") for r in ok):
-        # 有成功结果、也有可核对观测，但声明里没有具体观测可供对齐
-        kind = "generic"
-    elif any(r.get("signals") for r in err):
-        kind = "failed_only"
-    else:
-        # 有工具结果，但没有任何可核对的观测（读文件 / grep 之类）
-        kind = "none"
     return {
         "kind": kind,
+        "why": why,
         "claim_obs": sorted(claim_obs),
         "ok_obs": sorted(ok_obs),
-        "matched": len(matched),
+        "matched": len(_matched_results),
         "fresh": len(fresh),
         "stale": len(stale_matched),
         "write_relevance": relevance,
         "ok_results": len(ok),
         "err_results": len(err),
         "repro": repro,
+        "units_total": n,
+        "units_matched": n_match,
+        "units": [{"text": u["text"][:80], "kind": u["kind"]}
+                  for u in units],
+        "unit_kinds": [j["kind"] for j in judged],
     }
-
 
 # 否定 / 未来 / 条件语境（3.5.13 补，B2 误报一侧）。
 #
@@ -1725,6 +1818,8 @@ def main():
                                      "concrete": len(_concrete),
                                      "matched": _b["matched"],
                                      "claim_obs": ",".join(_b["claim_obs"])[:80],
+                                     "units_total": _b.get("units_total") or 0,
+                                     "units_matched": _b.get("units_matched") or 0,
                                      "errors": int(_scan.get("errors") or 0),
                                      "truncated": bool(_scan.get("truncated")),
                                      "digests": [r.get("digest")
@@ -1741,7 +1836,23 @@ def main():
             allow()
 
         # 其余情况：允许交付，但【不记为已验证】。
-        if _b["kind"] == "stale":
+        if _b["kind"] == "partial":
+            # ⚠️ 3.5.19 修补（混合报告）：部分声明单元有证据，其他没有。
+            #    不能把「局部匹配」记成「整份报告已验证」。
+            _rule, _key = ("report_partially_supported", "partial")
+            _units = _b.get("units") or []
+            _hit = [u["text"] for u, k in zip(_units, _b.get("unit_kinds") or [])
+                    if k in ("matched", "repro")]
+            _miss = [u["text"] for u, k in zip(_units, _b.get("unit_kinds") or [])
+                     if k not in ("matched", "repro")]
+            _why = ("这份报告里有 %d 项当前声明，其中 %d 项找到对应证据；\n"
+                    "    其余 %d 项未确认，不能一并记为已验证。\n"
+                    "    已有依据：%s\n"
+                    "    未确认：%s"
+                    % (_b.get("units_total") or 0, len(_hit), len(_miss),
+                       "；".join(_hit)[:160] or "无",
+                       "；".join(_miss)[:160] or "无"))
+        elif _b["kind"] == "stale":
             _rule, _key = ("results_superseded_by_later_edit", "stale")
             _why = ("声明里的观测确实出现过，但那之后写到了声明提到的对象；\n"
                     "    那条结果不能代表当前状态")
@@ -1777,6 +1888,8 @@ def main():
                                  "ok": _b["ok_results"],
                                  "err": _b["err_results"],
                                  "claim_obs": ",".join(_b["claim_obs"])[:80],
+                                 "units_total": _b.get("units_total") or 0,
+                                 "units_matched": _b.get("units_matched") or 0,
                                  "truncated": bool(_scan.get("truncated")),
                                  "delivery_channel": "additionalContext"})
         if not retry:
@@ -1829,35 +1942,39 @@ def main():
             _itrunc = bool(_iscan.get("truncated"))
             _iscan_ok = bool(_iscan.get("ok"))
             _iall = _iscan.get("results") or []
-            _iok = [r for r in _iall if not r.get("is_error")]
-            _ierr = [r for r in _iall if r.get("is_error")]
             _observed = (_inline.group(0)[:60] if _inline else "复现/预期失败")
-            # ⚠️ 一律从【完整正文】抽可核对特征 —— 复现声明里可能同时出现
-            #    行内片段（「已复现，HTTP 500」）；只取片段会丢掉声明里的
-            #    其他错误特征，也会让两条路径的判据不一致。
-            _iclaim = obs_tokens(asserted)
-            _iobs = set()
-            for _r in _iok:
-                _iobs |= obs_tokens(" ".join(_r.get("signals") or []))
-            # ⚠️ 与证据块走同一套判断：命中结果里必须有一条【之后没有写操作】，
-            #    否则不能当成本轮有效的对照（旧结果被后续修改覆盖）。
-            _imatched = [r for r in _iok
-                         if obs_tokens(" ".join(r.get("signals") or "")) & _iclaim]
-            _ifresh = [r for r in _imatched if not r.get("writes_after")]
-            _ihit = bool(_ifresh)
 
-            _ierr_hit = [r for r in _ierr
-                         if obs_tokens(" ".join(r.get("signals") or ""))
-                         & _iclaim]
-            if _iscan_ok and _repro_inline and _ierr_hit:
-                # 失败结果与声明里的可核对特征对上了，才支撑「已复现」。
-                # 失败观测支撑「已复现 / 预期失败」这一【具体结论】。
-                # ⚠️ 它不支撑「测试通过」—— 两者在这里分开记。
+            # ⚠️ 3.5.19 修补（混合报告）：与证据块路径复用同一个判断。
+            #    修前这里维护第二套「命中一个观测就 corroborated」的逻辑，
+            #    混合报告里的复现声明与完成声明会被一起放行。
+            #    现在统一走 _backing_state 的逐项判断。
+            _ib = _backing_state(asserted, _iscan, obs_tokens)
+            _ikind = _ib["kind"]
+
+            if _iscan_ok and _ikind == "matched":
+                record_gate_event(
+                    "G3", "inline_evidence_corroborated",
+                    "allow_by_inline_evidence", tool="Stop",
+                    session_id=_isid,
+                    extra={"risk": effective_risk,
+                           "observed": _observed,
+                           "results": len(_iall),
+                           "units_total": _ib.get("units_total") or 0,
+                           "delivery_channel": "additionalContext"})
+                if not retry:
+                    notify_once(_isid, "G3:inline-ok",
+                                "【G3 生效门】行内观测已与本会话的工具结果对上"
+                                "（风险级别：%s）。\n"
+                                "  ⚠️ 它证明的是这些观测，不是整体端到端生效。"
+                                % effective_risk)
+                allow()
+
+            if _iscan_ok and _ikind == "repro":
                 record_gate_event(
                     "G3", "inline_evidence_repro",
                     "allow_by_inline_evidence", tool="Stop", session_id=_isid,
                     extra={"risk": effective_risk, "observed": _observed,
-                           "failed_runs": len(_ierr),
+                           "failed_runs": _ib["err_results"],
                            "delivery_channel": "additionalContext"})
                 if not retry:
                     notify_once(_isid, "G3:inline-repro",
@@ -1871,25 +1988,6 @@ def main():
                                 % effective_risk)
                 allow()
 
-            # 复现声明只由失败结果支撑：关联不上就保持未确认，
-            # 不能改走「成功观测」路径拿一个 corroborated。
-            if _iscan_ok and _ihit and not _repro_inline:
-                record_gate_event(
-                    "G3", "inline_evidence_corroborated",
-                    "allow_by_inline_evidence", tool="Stop",
-                    session_id=_isid,
-                    extra={"risk": effective_risk,
-                           "observed": _observed,
-                           "results": len(_iok),
-                           "delivery_channel": "additionalContext"})
-                if not retry:
-                    notify_once(_isid, "G3:inline-ok",
-                                "【G3 生效门】行内观测已与本会话的工具结果对上"
-                                "（风险级别：%s）。\n"
-                                "  ⚠️ 它证明的是这一项观测，不是整体端到端生效。"
-                                % effective_risk)
-                allow()
-
             if not (_iscan_ok and not _iall and not _itrunc):
                 # 读不到 / 被截断 / 有结果但对不上 → 未确认，不指控
                 record_gate_event(
@@ -1897,14 +1995,19 @@ def main():
                     "allow_unconfirmed", tool="Stop", session_id=_isid,
                     extra={"risk": effective_risk, "observed": _observed,
                            "scan_ok": _iscan_ok, "truncated": _itrunc,
+                           "backing": _ikind,
+                           "units_total": _ib.get("units_total") or 0,
+                           "units_matched": _ib.get("units_matched") or 0,
                            "delivery_channel": "additionalContext"})
                 if not retry:
-                    if _repro_inline and not _iclaim:
-                        _why = ("声明是「已复现 / 预期失败」，但正文里没有"
-                                "可核对的错误特征（错误码 / 退出码），\n"
-                                "         无法确认失败结果是否属于这个问题")
-                    elif _repro_inline:
-                        _why = ("声明里的错误特征没有在失败结果里找到对应")
+                    if _ikind == "partial":
+                        _why = ("这份报告里有 %d 项当前声明，只有 %d 项找到"
+                                "对应证据；其余未确认"
+                                % (_ib.get("units_total") or 0,
+                                   _ib.get("units_matched") or 0))
+                    elif _ikind == "repro_unconfirmed":
+                        _why = ("声明是「已复现 / 预期失败」，"
+                                "但无法与具体失败结果关联")
                     elif _itrunc:
                         _why = "transcript 已截断，无法对照"
                     else:
