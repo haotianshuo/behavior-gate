@@ -17,10 +17,11 @@ cd behavior-gate
 
 ## 运行测试
 
-提交前必须全部通过（共 **517 项** = 19 套功能测试 517；检查器自身 20 项另计）：
+提交前必须全部通过（共 **556 项** = 20 套功能测试 556；检查器自身 20 项另计）：
 
 ```bash
-python tests/four_gate_selftest.py        # 57/57
+python tests/four_gate_selftest.py        # 58/58
+python tests/g3_g5_stabilization_test.py  # 38/38
 python tests/cmd_chain_test.py            # 21/21
 python tests/adversarial_test.py          # 25/25
 python tests/budget_safety_test.py        # 44/44
@@ -133,7 +134,7 @@ Closes #31
 ## Pull Request 检查清单
 
 ```text
-[ ] 517 项测试全部通过
+[ ] 556 项测试全部通过
 [ ] 无新增第三方依赖
 [ ] 如改了 hook，已同步更新 VERSION
 [ ] 如改了 hook，已刷新源身份（tools/source_identity.py --write）

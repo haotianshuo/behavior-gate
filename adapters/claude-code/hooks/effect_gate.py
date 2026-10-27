@@ -554,49 +554,129 @@ def _write_relevance(asserted, writes):
     return False if known else None
 
 
+# ---------------------------------------------------------------- 声明事项链
+#
+# 稳定化修复（2026-10-27）：把「声明提取 → 证据关联 → 单项判断 → 整体汇总
+# → 日志/提醒」定义成一条链，而不是为每个例句加特殊分支。
+#
+# 统一规则：
+#   1. 事项（item）= 一条【当前声明】+ 它自己的可核对观测。
+#   2. 事项只能使用【自己】的观测；不把全文或最近一条观测分给所有声明。
+#   3. 结论与观测可以分句 / 换行：只有出现明确的回指（它 / 该 / 上述 /
+#      同一个对象名）时才合并为同一事项；靠"位置最近"不算关联。
+#   4. 每个事项单独判断，结果只有三种：success（成功观测支持）、
+#      repro（失败观测支持复现）、unconfirmed（没有可核对依据）。
+#   5. 汇总保留类型：不能把纯复现记成普通成功验证。
+#   6. 扫描截断优先于一切匹配：截断时一律未确认，只保留诊断信息。
+
+# 回指标记：明确指代上一事项，才允许跨句合并观测。
+# ⚠️ 刻意不包含裸「返回 / 状态码 / 退出码」—— 它们只说明"有观测"，
+#    不说明"属于上一条声明"。只有带主语的指代（它的 / 该命令 / 上述结果）
+#    或复用同一个对象名，才算关联依据。
+_BACKREF_RX = re.compile(
+    r"^\s*(它|这|该|上述|前述|其|此)\s*(个|条|项|次|款|命令|测试|结果|"
+    r"输出|返回|响应|退出码|状态码|端口|文件|请求)?")
+
+
+def _split_sentences(text):
+    """按句末标点切分，保留分隔符。"""
+    return [s for s in re.split(r"(?<=[。！？!?；;\n])", text or "") if s.strip()]
+
+
 def _claim_units(text):
-    """把正文拆成【需要有证据支持的当前声明】单元。
+    """把正文拆成【当前声明事项】。
 
-    ⚠️ 3.5.19 修补（混合报告）：修前整段正文只要含复现声明就走复现分支，
-       一个失败结果匹配后整段报告放行 —— 后面的「修复已完成，HTTP 200」
-       没有独立核对。现在按句拆开，逐项判断。
+    与 _drop_negated_claims 用同一套子句/否定判据：
+      · 同一句多个完成词逐个判断，不因第一个命中决定整句去留；
+      · 「没有异常，上传已修复」的否定被逗号隔断，不影响后一子句；
+      · 「尚未修复 / 如果修复完成」不成为当前成功声明；
+      · 复现词同样过否定（「没有复现」不是复现声明）。
 
-    只做句子级切分，不做语义解析：
-      · 复现类句子 → kind="repro"
-      · 完成 / 通过类句子 → kind="success"
-      · 同一句同时含两类 → kind="mixed"（无法可靠拆分 → 未确认）
-      · 否定 / 假设语境里的完成词不算当前声明（复用既有 NegEx 判据）
+    返回 [{text, kind, claims, repros}]，
+    kind ∈ success / repro / mixed / evidence。
+    ⚠️ "evidence" = 不含声明词、但可能是补充观测的句子（例如
+       「它的退出码是 0」）。它本身不构成声明；只有明确回指上一事项
+       时才在 _link_units 里被合并，否则丢弃。
     """
     out = []
-    for sent in re.split(r"(?<=[。！？!?；;\n])", text or ""):
+    for sent in _split_sentences(text):
         s = sent.strip()
         if not s:
             continue
-        m_claim = CLAIM_RX.search(s)
-        m_repro = _REPRO_RX.search(s)
-        if not m_claim and not m_repro:
-            continue
-        if m_claim:
-            spans = _negation_spans(NEGATED_CLAIM_CTX, s)
-            neg = _last_negation_in(spans, 0, m_claim.start())
-            if neg is not None and not _negation_scope_closed(
-                    neg, s, m_claim.start()):
-                if not m_repro:
-                    continue
-        if m_claim and m_repro:
+        kept = _drop_negated_claims(s, CLAIM_RX)
+        repro_kept = _drop_negated_claims(s, _REPRO_RX)
+        if kept and repro_kept:
             kind = "mixed"
-        elif m_repro:
+        elif repro_kept:
             kind = "repro"
-        else:
+        elif kept:
             kind = "success"
-        out.append({"text": s, "kind": kind})
+        else:
+            kind = "evidence"
+        out.append({
+            "text": s,
+            "kind": kind,
+            "claims": [m.group(0) for m in kept],
+            "repros": [m.group(0) for m in repro_kept],
+        })
+    return out
+
+
+def _link_units(units):
+    """把明确属于同一事项的相邻句合并观测。
+
+    ⚠️ 只按【回指】合并：下一句以「它 / 该 / 上述 / 其结果」等开头，
+       或复用了上一句的对象名。靠位置最近、相同状态码/退出码不合并。
+       无法确认时各自独立 —— 独立事项各自未确认，不会被提升为已验证。
+
+    返回新的列表，每项增加 obs_text（合并后的可核对文本）与 link 字段。
+    """
+    out = []
+    for u in units:
+        is_evidence = u.get("kind") == "evidence"
+        linked = False
+        if out:
+            first = u["text"].lstrip()
+            if _BACKREF_RX.match(first):
+                linked = True
+            else:
+                # 复用同一个对象名（>=4 字的连续词组）也算明确关联
+                _names = re.findall(r"[A-Za-z_][A-Za-z0-9_.-]{3,}",
+                                    out[-1]["text"])
+                if any(n in u["text"] for n in _names):
+                    linked = True
+        if is_evidence:
+            # 纯观测句：只有明确回指上一事项时才作为补充证据；
+            # 否则它不是任何声明的一部分，直接丢弃（不分配给别人）。
+            if linked and out:
+                prev = out[-1]
+                prev["obs_text"] += "\n" + u["text"]
+                prev.setdefault("linked_text", "")
+                prev["linked_text"] += u["text"]
+            continue
+        if linked:
+            prev = out[-1]
+            prev["obs_text"] = prev.get("obs_text", prev["text"]) + "\n" + u["text"]
+            prev["linked_text"] = prev.get("linked_text", "") + u["text"]
+            # 后续句的类型不覆盖首句：它只是补充证据
+            prev.setdefault("extra_claims", []).extend(u.get("claims") or [])
+            prev.setdefault("extra_repros", []).extend(u.get("repros") or [])
+            continue
+        u = dict(u)
+        u["obs_text"] = u["text"]
+        u["link"] = "self"
+        out.append(u)
     return out
 
 
 def _judge_unit(unit, asserted, scan, obs_tokens):
-    """判断一个声明单元有没有对应证据。只看字面观测，不做语义理解。"""
+    """判断一个事项有没有依据。只比对字面观测，不做语义理解。
+
+    返回 {support, why, obs}：
+      support = "success" | "repro" | None
+    """
+    text = unit.get("obs_text") or unit.get("text") or ""
     kind = unit.get("kind")
-    text = unit.get("text") or ""
     rs = scan.get("results") or []
     ok = [r for r in rs if not r.get("is_error")]
     err = [r for r in rs if r.get("is_error")]
@@ -604,61 +684,47 @@ def _judge_unit(unit, asserted, scan, obs_tokens):
 
     if kind == "mixed":
         # 同一句里既有复现又有完成 —— 无法可靠拆分，保留未确认
-        return {"kind": "unmatched", "why": "mixed-claim", "obs": sorted(obs)}
+        return {"support": None, "why": "mixed-claim", "obs": sorted(obs)}
     if kind == "repro":
         if not obs:
-            return {"kind": "repro_unconfirmed", "why": "no-observable",
-                    "obs": []}
+            return {"support": None, "why": "no-observable", "obs": []}
         hit = [r for r in err if obs_tokens(_signals_text(r)) & obs]
-        if hit:
-            return {"kind": "repro", "why": "", "obs": sorted(obs)}
-        return {"kind": "repro_unconfirmed", "why": "no-matching-failure",
-                "obs": sorted(obs)}
+        return ({"support": "repro", "why": "", "obs": sorted(obs)}
+                if hit else
+                {"support": None, "why": "no-matching-failure",
+                 "obs": sorted(obs)})
 
     # success
     if not obs:
-        if any(r.get("signals") for r in ok):
-            return {"kind": "generic", "why": "no-observable", "obs": []}
-        if any(r.get("signals") for r in err):
-            return {"kind": "failed_only", "why": "no-observable", "obs": []}
-        return {"kind": "none", "why": "no-observable", "obs": []}
+        return {"support": None, "why": "no-observable", "obs": []}
     hit_any = [r for r in ok if obs_tokens(_signals_text(r)) & obs]
     fresh = [r for r in hit_any if not r.get("writes_after")]
     if fresh:
-        return {"kind": "matched", "why": "", "obs": sorted(obs)}
+        return {"support": "success", "why": "", "obs": sorted(obs)}
     if hit_any:
         writes = [w for r in hit_any for w in (r.get("writes_after") or [])]
         conf = [w for w in writes if w.get("state") == "confirmed"]
         rel = _write_relevance(asserted, conf) if conf else None
         if conf and rel is True:
-            return {"kind": "stale", "why": "related-write",
-                    "obs": sorted(obs)}
-        # 只有失败 / 未完成的写，或无法确认写的是不是同一对象
-        return {"kind": "write_unconfirmed", "why": "write-unconfirmed",
+            return {"support": None, "why": "related-write", "obs": sorted(obs)}
+        return {"support": None, "why": "write-unconfirmed",
                 "obs": sorted(obs)}
-    return {"kind": "unmatched", "why": "not-found", "obs": sorted(obs)}
+    return {"support": None, "why": "not-found", "obs": sorted(obs)}
 
 
 def _backing_state(asserted, scan, obs_tokens):
-    """把「发现观测」与「支持当前声明」分开。
+    """把「发现观测」与「支持当前声明」分开，并汇总为整体结论。
 
     返回 kind（互斥）：
-      matched           每个声明单元都有对应证据（逐项，不是"整份报告"）
-      partial           部分单元有证据，其他未确认（不得记成已验证）
-      stale             有对应，但之后写到了【声明提到的对象】
-      write_unconfirmed 有对应，但之后有写操作、无法确认是否影响该对象
-      unmatched         声明里有具体观测，结果里找不到对应（可能被截断）
-      repro             复现声明的错误特征出现在失败结果里
-      repro_unconfirmed 复现类声明无法与具体失败结果关联（未确认）
-      generic           有成功结果，但没有任何具体观测能与声明对齐
-      failed_only       只有失败结果，且声明不是复现类
-      none              没有任何可核对观测
+      matched           每个事项都有依据；类型混合时在 extra 里分开记
+      repro             只有复现事项且都有依据（不记成功验证）
+      partial           部分事项有依据，其余未确认
+      truncated         扫描被截断 —— 无论是否匹配，一律未确认
+      stale / write_unconfirmed / unmatched / repro_unconfirmed /
+      generic / failed_only / none   单事项未确认的具体原因
 
-    ⚠️ 3.5.19 修补（混合报告）：
-      修前整段正文只要含复现声明就整体走复现分支；一个失败结果匹配后，
-      同段里「修复已完成 / 全部通过」等当前声明不再单独核对。
-      现在按句拆成单元、逐项判断；部分匹配记 partial，日志与提示
-      分别说明「哪些匹配、哪些未确认」，不把部分匹配写成整份已验证。
+    ⚠️ 截断优先级最高：证据块与行内路径都走这里，不允许"先匹配、后看截断"。
+       已发现的观测只作为诊断信息（extra.observed），不记已验证。
 
     ⚠️ 本函数不做语义理解：只比对字面观测，不判断对象 / 操作是否同一件事。
        相同错误码 / 退出码只证明字面一致。matched 只表示「观测可对照」。
@@ -671,32 +737,14 @@ def _backing_state(asserted, scan, obs_tokens):
     for r in ok:
         ok_obs |= obs_tokens(_signals_text(r))
 
-    units = _claim_units(asserted)
+    units = _link_units(_claim_units(asserted))
     judged = [_judge_unit(u, asserted, scan, obs_tokens) for u in units]
     n = len(judged)
-    # repro 也是「该单元找到证据」的一种，不能只数 matched
-    n_match = sum(1 for j in judged if j["kind"] in ("matched", "repro"))
+    n_success = sum(1 for j in judged if j["support"] == "success")
+    n_repro = sum(1 for j in judged if j["support"] == "repro")
+    n_supported = n_success + n_repro
 
-    if n == 0:
-        # 没有可识别的声明单元：沿用原有「是否有观测」的分类
-        if any(r.get("signals") for r in ok):
-            kind = "generic"
-        elif any(r.get("signals") for r in err):
-            kind = "failed_only"
-        else:
-            kind = "none"
-        why = "no-claim-unit"
-    elif n_match == n:
-        kind, why = "matched", ""
-    elif n_match:
-        kind, why = "partial", "partial-match"
-    elif n >= 2:
-        kind, why = "unmatched", "multi-none"
-    else:
-        kind = judged[0]["kind"]
-        why = judged[0]["why"]
-
-    # 统计字段（事件与提示用）
+    # 诊断信息（截断时也保留）
     _matched_results = ([r for r in ok
                          if obs_tokens(_signals_text(r)) & claim_obs]
                         if claim_obs else [])
@@ -706,7 +754,43 @@ def _backing_state(asserted, scan, obs_tokens):
     for r in stale_matched:
         _targets.extend(r.get("writes_after") or [])
     relevance = _write_relevance(asserted, _targets) if stale_matched else False
-    repro = any(u.get("kind") in ("repro", "mixed") for u in units)
+
+    if scan.get("truncated"):
+        kind, why = "truncated", "scan-truncated"
+    elif n == 0:
+        if any(r.get("signals") for r in ok):
+            kind = "generic"
+        elif any(r.get("signals") for r in err):
+            kind = "failed_only"
+        else:
+            kind = "none"
+        why = "no-claim-unit"
+    elif n_supported == n:
+        if n_success == 0 and n_repro > 0:
+            kind, why = "repro", ""
+        else:
+            kind, why = "matched", ""
+    elif n_supported:
+        kind, why = "partial", "partial-match"
+    elif n >= 2:
+        kind, why = "unmatched", "multi-none"
+    else:
+        kind = judged[0]["why"] if judged[0]["why"] in (
+            "related-write", "write-unconfirmed", "not-found",
+            "no-matching-failure", "mixed-claim", "no-observable") \
+            else "unmatched"
+        # 映射回既有 kind，消费者不必新增分支
+        kind = {
+            "related-write": "stale",
+            "write-unconfirmed": "write_unconfirmed",
+            "no-matching-failure": "repro_unconfirmed",
+            "mixed-claim": "unmatched",
+            "no-observable": "generic" if any(r.get("signals") for r in ok)
+            else ("failed_only" if any(r.get("signals") for r in err)
+                  else "none"),
+            "not-found": "unmatched",
+        }.get(kind, "unmatched")
+        why = judged[0]["why"]
 
     return {
         "kind": kind,
@@ -719,12 +803,15 @@ def _backing_state(asserted, scan, obs_tokens):
         "write_relevance": relevance,
         "ok_results": len(ok),
         "err_results": len(err),
-        "repro": repro,
+        "repro": n_repro > 0,
         "units_total": n,
-        "units_matched": n_match,
-        "units": [{"text": u["text"][:80], "kind": u["kind"]}
-                  for u in units],
-        "unit_kinds": [j["kind"] for j in judged],
+        "units_matched": n_supported,
+        "units_success": n_success,
+        "units_repro": n_repro,
+        "units": [{"text": u["text"][:80], "kind": u["kind"],
+                   "support": j["support"], "why": j["why"]}
+                  for u, j in zip(units, judged)],
+        "unit_kinds": [j["support"] or "unconfirmed" for j in judged],
     }
 
 # 否定 / 未来 / 条件语境（3.5.13 补，B2 误报一侧）。
@@ -1820,6 +1907,8 @@ def main():
                                      "claim_obs": ",".join(_b["claim_obs"])[:80],
                                      "units_total": _b.get("units_total") or 0,
                                      "units_matched": _b.get("units_matched") or 0,
+                                     "units_success": _b.get("units_success") or 0,
+                                     "units_repro": _b.get("units_repro") or 0,
                                      "errors": int(_scan.get("errors") or 0),
                                      "truncated": bool(_scan.get("truncated")),
                                      "digests": [r.get("digest")
@@ -1836,20 +1925,28 @@ def main():
             allow()
 
         # 其余情况：允许交付，但【不记为已验证】。
-        if _b["kind"] == "partial":
+        if _b["kind"] == "truncated":
+            # ⚠️ 稳定化修复：截断优先级最高 —— 即使发现了匹配观测也不记已验证。
+            #    已发现的观测只作诊断信息，写进事件。
+            _rule, _key = ("scan_truncated_unconfirmed", "truncated")
+            _why = ("transcript 只读了尾部且已截断，无法确认声明对应的结果"
+                    "是否在可见范围内。\n"
+                    "    已发现的观测只作诊断，本轮不记为已验证")
+        elif _b["kind"] == "partial":
             # ⚠️ 3.5.19 修补（混合报告）：部分声明单元有证据，其他没有。
             #    不能把「局部匹配」记成「整份报告已验证」。
             _rule, _key = ("report_partially_supported", "partial")
             _units = _b.get("units") or []
-            _hit = [u["text"] for u, k in zip(_units, _b.get("unit_kinds") or [])
-                    if k in ("matched", "repro")]
-            _miss = [u["text"] for u, k in zip(_units, _b.get("unit_kinds") or [])
-                     if k not in ("matched", "repro")]
-            _why = ("这份报告里有 %d 项当前声明，其中 %d 项找到对应证据；\n"
+            _hit = [u["text"] for u in _units if u.get("support")]
+            _miss = [u["text"] for u in _units if not u.get("support")]
+            _why = ("这份报告里有 %d 项当前声明，其中 %d 项找到对应证据"
+                    "（成功 %d / 复现 %d）；\n"
                     "    其余 %d 项未确认，不能一并记为已验证。\n"
                     "    已有依据：%s\n"
                     "    未确认：%s"
-                    % (_b.get("units_total") or 0, len(_hit), len(_miss),
+                    % (_b.get("units_total") or 0, len(_hit),
+                       _b.get("units_success") or 0,
+                       _b.get("units_repro") or 0, len(_miss),
                        "；".join(_hit)[:160] or "无",
                        "；".join(_miss)[:160] or "无"))
         elif _b["kind"] == "stale":
@@ -2000,16 +2097,19 @@ def main():
                            "units_matched": _ib.get("units_matched") or 0,
                            "delivery_channel": "additionalContext"})
                 if not retry:
-                    if _ikind == "partial":
+                    if _ikind == "truncated":
+                        _why = ("transcript 已截断，无法对照 —— "
+                                "已发现的观测只作诊断，不记已验证")
+                    elif _ikind == "partial":
                         _why = ("这份报告里有 %d 项当前声明，只有 %d 项找到"
-                                "对应证据；其余未确认"
+                                "对应证据（成功 %d / 复现 %d）；其余未确认"
                                 % (_ib.get("units_total") or 0,
-                                   _ib.get("units_matched") or 0))
+                                   _ib.get("units_matched") or 0,
+                                   _ib.get("units_success") or 0,
+                                   _ib.get("units_repro") or 0))
                     elif _ikind == "repro_unconfirmed":
                         _why = ("声明是「已复现 / 预期失败」，"
                                 "但无法与具体失败结果关联")
-                    elif _itrunc:
-                        _why = "transcript 已截断，无法对照"
                     else:
                         _why = "无法在本会话的工具结果里找到对应"
                     notify_once(_isid, "G3:inline-unconfirmed",

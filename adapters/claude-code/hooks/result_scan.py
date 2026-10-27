@@ -45,6 +45,7 @@ _SIGNAL_RX = re.compile(
     r"(HTTP/\d(?:\.\d)?\s+[1-5]\d\d"
     r"|\b(?:status|状态码)\s*[:=]?\s*[1-5]\d\d"
     r"|\b(?:exit|Exit)\s*(?:code|status)?\s*[:=]?\s*\d+\b"
+    r"|(?:退出码|返回码)\s*[:：=是为]?\s*\d+"
     r"|\blistening on\s+\S+"
     r"|\bEADDRINUSE\b)")
 
@@ -114,7 +115,9 @@ def _write_targets(name, tool_input):
 # 观测归一化：把「HTTP 200」「status: 200」「都是 200」变成同一个 token。
 # 刻意只认这三类可机器比对的观测；其余文本一律不猜。
 _OBS_HTTP_RX = re.compile(r"\b([1-5]\d\d)\b")
-_OBS_EXIT_RX = re.compile(r"\bexit\s*(?:code|status)?\s*[:=]?\s*(\d+)\b", re.I)
+_OBS_EXIT_RX = re.compile(
+    r"(?:\bexit\s*(?:code|status)?|退出码|返回码)\s*"
+    r"[:：=是为]?\s*(\d+)\b", re.I)
 _OBS_LISTEN_RX = re.compile(r"listening on\s+(\S+)", re.I)
 
 

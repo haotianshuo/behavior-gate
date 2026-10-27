@@ -35,6 +35,9 @@ jobs:
       - name: 四关自测
         run: python tests/four_gate_selftest.py
 
+      - name: G3/G5 稳定化双回归
+        run: python tests/g3_g5_stabilization_test.py
+
       - name: 安装链路
         run: python tests/cmd_chain_test.py
 

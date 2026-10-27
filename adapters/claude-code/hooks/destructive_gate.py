@@ -554,6 +554,51 @@ _HEREDOC_RX = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _HEREDOC_EXEC_RX = re.compile(r"(\$\(|`|\$\{)")
 
 
+def _split_command_segments(head):
+    """按【未加引号】的 | ; & 切分命令段。
+
+    ⚠️ 稳定化修复：直接 `re.split(r"[|;&]", head)` 会被引号里的分隔符误导 ——
+       `sh -s 'label; cat' <<EOF` 会被切成 ["sh -s 'label", "cat'"]，
+       于是最后一个命令被误认成 cat，正文获得错误的文档豁免。
+    引号未闭合 / 反斜杠结尾 → 返回 None，调用方取消豁免。
+    """
+    segs, cur = [], []
+    quote = None
+    i, n = 0, len(head or "")
+    while i < n:
+        ch = head[i]
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            cur.append(ch)
+            if i + 1 < n:
+                cur.append(head[i + 1])
+                i += 2
+            else:
+                return None
+            continue
+        if ch in "|;&":
+            segs.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    if quote:
+        return None
+    segs.append("".join(cur))
+    return [s.strip() for s in segs if s.strip()]
+
+
 def _heredoc_doc_ranges(cmd):
     """返回 heredoc 正文的 (start, end) 区间 —— 仅限【不会被执行】的正文。
 
@@ -588,10 +633,12 @@ def _heredoc_doc_ranges(cmd):
         #    修前只看整行第一个词：`cat | sh <<'EOF'` 会被当成 cat 的输入，
         #    于是正文获得文档豁免 —— 但实际执行它的是 sh。
         #    分隔符加引号只影响正文是否展开，不代表正文不会被执行。
-        _cmds = [c.strip() for c in re.split(r"[|;&]", head) if c.strip()]
-        consumer = ""
-        if _cmds:
-            consumer = _cmds[-1].split()[0].strip("'\"")
+        _cmds = _split_command_segments(head)
+        if not _cmds:
+            # 引号未闭合 / 解析失败 → 取消豁免，继续走原危险检查
+            i += 1
+            continue
+        consumer = _cmds[-1].split()[0].strip("'\"") if _cmds[-1].split() else ""
         if consumer not in _HEREDOC_DOC_CMDS or "|" in tail:
             i += 1
             continue

@@ -224,12 +224,20 @@ def main():
                   {"session_id": sid3, "stop_hook_active": True,
                    "last_assistant_message": "已经修复了。"},
                   tmp)
-    # ⚠️ 断言已修正（#43）：修前这里断言"无条件放行"，
-    #    而那正是「原样重发即可通过」的缺陷。
-    #    现在的语义是：重试仍放行（防死循环），但【放行必须可见】。
-    check("重试轮次放行，且放行可见",
-          c == 0 and "可见的放行" in e,
-          "exit=%d stderr=%s" % (c, e[:200]))
+    # ⚠️ 稳定化修复（2026-10-27）：旧断言检查「可见的放行」这句文案，
+    #    但它已被证实【模型看不到】（exit 0 的 stderr 不进上下文）——
+    #    换一句字符串不算修好。现在检查当前明确约定的行为与事件：
+    #      · 重试轮次放行（防死循环）；
+    #      · 不追加 additionalContext（不制造新的续写）；
+    #      · 事件记为 stop_feedback_retry（可统计）。
+    check("重试轮次放行，且不追加模型上下文",
+          c == 0 and "additionalContext" not in o,
+          "exit=%d stdout=%s" % (c, o[:200]))
+    with open(os.path.join(tmp, "gate-events.jsonl"), encoding="utf-8") as _f:
+        _ev = [json.loads(x) for x in _f if x.strip()]
+    check("重试轮次事件为 stop_feedback_retry",
+          any(x.get("decision") == "stop_feedback_retry" for x in _ev),
+          str(_ev[-2:]))
 
     # --- #43 回归用例：G3 提示模板自己要求的字段，不能成为绕过门的钥匙 ---
     #
