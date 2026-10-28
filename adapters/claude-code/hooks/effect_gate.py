@@ -579,8 +579,48 @@ _BACKREF_RX = re.compile(
 
 
 def _split_sentences(text):
-    """按句末标点切分，保留分隔符。"""
-    return [s for s in re.split(r"(?<=[。！？!?；;\n])", text or "") if s.strip()]
+    """按句末标点切分，返回 [(句子, 与前一句之间的分隔符)]。
+
+    ⚠️ 分隔符保留下来用于判断「同段 / 空行」——归属不能只靠位置，
+       但段落结构是明确的书面线索之一。
+    """
+    tokens = re.split(r"([。！？!?；;\n]+)", text or "")
+    out, prev_sep = [], ""
+    for i in range(0, len(tokens), 2):
+        sent = tokens[i]
+        sep = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if sent.strip():
+            out.append((sent.strip(), prev_sep))
+        if sep:
+            prev_sep = sep
+    return out
+
+
+# 对象名候选里的观测/工具词 —— 它们只说明"有观测"，不是对象身份。
+_OBJ_STOPWORDS = frozenset({
+    "exit", "code", "status", "http", "https", "true", "false", "null",
+    "error", "errors", "test", "tests", "bash", "json", "stdout", "stderr",
+    "result", "results", "output", "port", "code0", "code1",
+})
+
+# 证据标签：常见的「结论 + 检查结果」格式。同段时作为归属线索。
+_EVIDENCE_LABEL_RX = re.compile(
+    r"^\s*(结果|输出|返回|退出码|返回码|状态码|响应|端口|日志|证据|实测)\s*[:：]?")
+
+# 汇报测试结果 vs 宣布任务完成。
+# 「测试全部通过」是在汇报检查结果，不该被当成任务级完成宣言；
+# 但同一段里出现任务目标词（任务/功能/问题/修复/上线…）时仍需正常判定。
+_REPORT_SUBJECT_RX = re.compile(r"(测试|用例|检查|构建|回归|套件|单元测试|集成测试)")
+_TASK_GOAL_RX = re.compile(r"(任务|功能|问题|修复|需求|目标|上线|部署|交付|验收)")
+
+
+def _is_report_only(sent, m):
+    """这个完成词是否只修饰「测试/检查」而不是任务目标。"""
+    if _TASK_GOAL_RX.search(sent):
+        return False
+    before = sent[max(0, m.start() - 10):m.start()]
+    after = sent[m.end():m.end() + 6]
+    return bool(_REPORT_SUBJECT_RX.search(before + after))
 
 
 def _claim_units(text):
@@ -590,21 +630,17 @@ def _claim_units(text):
       · 同一句多个完成词逐个判断，不因第一个命中决定整句去留；
       · 「没有异常，上传已修复」的否定被逗号隔断，不影响后一子句；
       · 「尚未修复 / 如果修复完成」不成为当前成功声明；
-      · 复现词同样过否定（「没有复现」不是复现声明）。
+      · 复现词同样过否定（「没有复现」不是复现声明）；
+      · 「测试全部通过」这类【只汇报检查结果】的句子不作为任务级完成声明。
 
-    返回 [{text, kind, claims, repros}]，
+    返回 [{text, kind, claims, repros, gap}]，
     kind ∈ success / repro / mixed / evidence。
-    ⚠️ "evidence" = 不含声明词、但可能是补充观测的句子（例如
-       「它的退出码是 0」）。它本身不构成声明；只有明确回指上一事项
-       时才在 _link_units 里被合并，否则丢弃。
     """
     out = []
-    for sent in _split_sentences(text):
-        s = sent.strip()
-        if not s:
-            continue
-        kept = _drop_negated_claims(s, CLAIM_RX)
-        repro_kept = _drop_negated_claims(s, _REPRO_RX)
+    for sent, gap in _split_sentences(text):
+        kept = _drop_negated_claims(sent, CLAIM_RX)
+        repro_kept = _drop_negated_claims(sent, _REPRO_RX)
+        kept = [m for m in kept if not _is_report_only(sent, m)]
         if kept and repro_kept:
             kind = "mixed"
         elif repro_kept:
@@ -614,60 +650,62 @@ def _claim_units(text):
         else:
             kind = "evidence"
         out.append({
-            "text": s,
+            "text": sent,
             "kind": kind,
             "claims": [m.group(0) for m in kept],
             "repros": [m.group(0) for m in repro_kept],
+            "gap": gap,
         })
     return out
 
 
+def _obj_names(text):
+    """可当作对象身份的标识符（排除观测词/工具词）。"""
+    return [n for n in re.findall(r"[A-Za-z_][A-Za-z0-9_.-]{3,}", text or "")
+            if n.lower() not in _OBJ_STOPWORDS]
+
+
 def _link_units(units):
-    """把明确属于同一事项的相邻句合并观测。
+    """把补充观测合并到所属事项；含新声明的句子【永远独立成项】。
 
-    ⚠️ 只按【回指】合并：下一句以「它 / 该 / 上述 / 其结果」等开头，
-       或复用了上一句的对象名。靠位置最近、相同状态码/退出码不合并。
-       无法确认时各自独立 —— 独立事项各自未确认，不会被提升为已验证。
+    ⚠️ 稳定化修复（2026-10-27 第二轮）：修前把「含新声明的句子」也合并进
+       上一事项，claims 只塞进 extra_claims，下游从不读 —— 于是
+       「原故障已复现，exit code 1。它已修复，exit code 0。」里
+       「已修复」直接消失。现在：
+         · 含 success/repro/mixed 的句子 → 独立事项，单独判断；
+         · 只有纯观测句才可能合并，且必须有明确归属线索：
+           回指（它/该/上述）、复用对象名、或「同段 + 证据标签」。
+         · 靠位置最近、相同状态码/退出码不合并。
 
-    返回新的列表，每项增加 obs_text（合并后的可核对文本）与 link 字段。
+    返回新的列表，每项增加 obs_text（合并后的可核对文本）与 link。
     """
     out = []
     for u in units:
-        is_evidence = u.get("kind") == "evidence"
+        first = u["text"].lstrip()
         linked = False
         if out:
-            first = u["text"].lstrip()
             if _BACKREF_RX.match(first):
                 linked = True
-            else:
-                # 复用同一个对象名（>=4 字的连续词组）也算明确关联
-                _names = re.findall(r"[A-Za-z_][A-Za-z0-9_.-]{3,}",
-                                    out[-1]["text"])
-                if any(n in u["text"] for n in _names):
-                    linked = True
-        if is_evidence:
-            # 纯观测句：只有明确回指上一事项时才作为补充证据；
-            # 否则它不是任何声明的一部分，直接丢弃（不分配给别人）。
+            elif any(n in u["text"] for n in _obj_names(out[-1]["text"])):
+                linked = True
+            elif (u.get("gap") or "").count("\n") == 1 \
+                    and _EVIDENCE_LABEL_RX.match(first):
+                # 同段（单个换行）+ 证据标签：常见的「结论＋结果」写法
+                linked = True
+        if u["kind"] == "evidence":
             if linked and out:
                 prev = out[-1]
                 prev["obs_text"] += "\n" + u["text"]
                 prev.setdefault("linked_text", "")
                 prev["linked_text"] += u["text"]
+            # 不属于任何事项的观测句直接丢弃（不分配给其他声明）
             continue
-        if linked:
-            prev = out[-1]
-            prev["obs_text"] = prev.get("obs_text", prev["text"]) + "\n" + u["text"]
-            prev["linked_text"] = prev.get("linked_text", "") + u["text"]
-            # 后续句的类型不覆盖首句：它只是补充证据
-            prev.setdefault("extra_claims", []).extend(u.get("claims") or [])
-            prev.setdefault("extra_repros", []).extend(u.get("repros") or [])
-            continue
+        # 含声明的句子：独立成项，不降格为补充证据
         u = dict(u)
         u["obs_text"] = u["text"]
-        u["link"] = "self"
+        u["link"] = "ref" if linked else "self"
         out.append(u)
     return out
-
 
 def _judge_unit(unit, asserted, scan, obs_tokens):
     """判断一个事项有没有依据。只比对字面观测，不做语义理解。
@@ -740,6 +778,25 @@ def _backing_state(asserted, scan, obs_tokens):
     units = _link_units(_claim_units(asserted))
     judged = [_judge_unit(u, asserted, scan, obs_tokens) for u in units]
     n = len(judged)
+
+    # ⚠️ 证据歧义：多个事项用同一组观测、但对象不同 → 无法确定这份证据
+    #    属于哪一个。「app.py 已修复，HTTP 200。db.py 已修复，HTTP 200。」
+    #    只有一个 200 结果时，不能同时证明两个对象。降级为未确认。
+    _groups = {}
+    for _u, _j in zip(units, judged):
+        if _j["support"] != "success":
+            continue
+        _groups.setdefault(tuple(_j["obs"]), []).append(_u)
+    _ambiguous = set()
+    for _key, _us in _groups.items():
+        if len(_us) > 1 and len({tuple(sorted(_obj_names(x["text"])))
+                                for x in _us}) > 1:
+            _ambiguous.add(_key)
+    for _j in judged:
+        if _j["support"] == "success" and tuple(_j["obs"]) in _ambiguous:
+            _j["support"] = None
+            _j["why"] = "shared-observable"
+
     n_success = sum(1 for j in judged if j["support"] == "success")
     n_repro = sum(1 for j in judged if j["support"] == "repro")
     n_supported = n_success + n_repro
@@ -1581,11 +1638,10 @@ def main():
     asserted, _hist_note = _drop_historical_sentences(
         asserted, data.get("session_id"))
     if _hist_note:
+        # ⚠️ 只写诊断输出。历史引用剔除是【放行理由】，不是需要模型
+        #    纠正的内容 —— 普通放行必须安静（稳定化验收要求）。
         sys.stderr.write("【G3 生效门】%s\n" % _hist_note)
         sys.stderr.flush()
-        if not retry:
-            notify_once(data.get("session_id"), "G3:hist-note",
-                        "【G3 生效门】%s" % _hist_note)
 
     # 不合规时的统一出口（#43）。
     # 三处 deny_stop 都改走这里 —— 「拦一次」的语义只有一处实现，
@@ -1635,12 +1691,9 @@ def main():
                                   "review_filtered", tool="Stop",
                                   session_id=data.get("session_id"))
             sys.stderr.write("【G3 生效门】%s\n" % _sem_note)
+            # ⚠️ 只写诊断输出：引用剔除/归属不确定不改变本次放行结论，
+            #    普通放行保持安静（稳定化验收要求）。
             sys.stderr.flush()
-            # 3.5.19 修补：归属不确定/引用剔除的说明必须送达模型，
-            # 否则它只留在日志里 —— 模型会以为门没看见。去重只发一次。
-            if not retry:
-                notify_once(data.get("session_id"), "G3:sem-note",
-                            "【G3 生效门】%s" % _sem_note)
 
     claim, level, level_num, risk = analyze(asserted)
 
@@ -1667,9 +1720,7 @@ def main():
             if _note2:
                 sys.stderr.write("【G3 生效门】%s\n" % _note2)
                 sys.stderr.flush()
-                if not retry:
-                    notify_once(data.get("session_id"), "G3:sem-find-note",
-                                "【G3 生效门】%s" % _note2)
+                # 诊断输出即可；普通放行不追加模型上下文。
 
     # ⚠️ B2 误报一侧（3.5.13）：把处在【否定/未来/条件语境】里的完成词剔除。
     #
@@ -1702,6 +1753,18 @@ def main():
 
     if not claim:
         allow()
+
+    # ⚠️ 稳定化修复：只汇报检查结果（「测试全部通过」）不等于宣布任务完成。
+    #    如果正文里所有完成词都只修饰测试/检查，且没有任务目标词，
+    #    本门不适用 —— 普通汇报不该被要求写证据块。
+    #    语义评审找到的 claim 不受此限（它已经做过归属判断）。
+    if not claim_from_semantic:
+        _pre_units = _claim_units(asserted)
+        if not any(u["kind"] != "evidence" for u in _pre_units):
+            record_gate_event("G3", "report_only_no_task_claim",
+                              "allow_report_only", tool="Stop",
+                              session_id=data.get("session_id"))
+            allow()
 
     has_block = bool(EVIDENCE_RX.search(asserted))
 
@@ -2058,12 +2121,7 @@ def main():
                            "results": len(_iall),
                            "units_total": _ib.get("units_total") or 0,
                            "delivery_channel": "additionalContext"})
-                if not retry:
-                    notify_once(_isid, "G3:inline-ok",
-                                "【G3 生效门】行内观测已与本会话的工具结果对上"
-                                "（风险级别：%s）。\n"
-                                "  ⚠️ 它证明的是这些观测，不是整体端到端生效。"
-                                % effective_risk)
+                # 匹配成功属于普通放行：保持安静，不追加模型上下文。
                 allow()
 
             if _iscan_ok and _ikind == "repro":

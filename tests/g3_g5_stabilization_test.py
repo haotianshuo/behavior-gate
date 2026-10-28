@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""G3 / G5 稳定化修复的双向回归（2026-10-27）。
+"""G3 / G5 稳定化修复的双向回归（2026-10-28）。
 
-覆盖本轮五个根因的「应识别」与「不应误伤」两侧，并覆盖实际 hook 入口、
-最终 JSON 与事件记录。
+覆盖验收矩阵的 12 类场景，每一类同时覆盖「应识别」与「不应误伤」，
+并覆盖实际 hook 入口、最终 JSON 与事件。
 
 运行：python tests/g3_g5_stabilization_test.py
 """
@@ -90,7 +90,6 @@ def events(state_dir):
 
 
 def transcript(rows):
-    """rows: [(type, payload)] → transcript 文件路径。"""
     d = tempfile.mkdtemp(prefix="stab-tx-")
     p = os.path.join(d, "t.jsonl")
     with open(p, "w", encoding="utf-8") as f:
@@ -98,6 +97,10 @@ def transcript(rows):
             f.write(json.dumps({"message": {"content": blocks}},
                                ensure_ascii=False) + "\n")
     return p
+
+
+def _has_claim(units):
+    return any(x["kind"] != "evidence" for x in units)
 
 
 def main():
@@ -110,7 +113,6 @@ def main():
     u = EG._claim_units("没有异常，上传已修复。")
     check("A1 「没有异常，上传已修复」保留上传声明",
           len(u) == 1 and u[0]["kind"] == "success", str(u))
-    _has_claim = lambda us: any(x["kind"] != "evidence" for x in us)
     u = EG._claim_units("尚未修复。")
     check("A2 「尚未修复」不算当前声明", not _has_claim(u), str(u))
     u = EG._claim_units("如果修复完成，那就可以验收。")
@@ -121,42 +123,49 @@ def main():
     check("A5 同句多个完成词逐个判断",
           len(u) == 1 and len(u[0]["claims"]) == 1, str(u))
 
-    # ---------------- B. 跨句关联 ----------------
-    print("\n----- B. 同事项跨句关联 -----")
+    # ---------------- B. 跨句 / 同事项关联 ----------------
+    print("\n----- B. 意见归属与跨句关联 -----")
     rows = [mk(["exit code 0"])]
     b = backing("上传已完成。\n它的退出码是 0。", rows)
-    check("B1 明确回指 → 同事项合并，得到支持",
+    check("B1 明确回指 → 合并，得到支持", b["kind"] == "matched",
+          str(b["kind"]))
+    b = backing("上传已完成。\n退出码：0。", rows)
+    check("B2 同段 + 证据标签 → 合并（常见「结论＋结果」写法）",
           b["kind"] == "matched", str(b["kind"]))
-    b = backing("上传已完成。\n退出码是 0。", rows)
-    check("B2 无回指 → 不自动关联，保持未确认",
-          b["kind"] not in ("matched",), str(b["kind"]))
+    b = backing("上传已完成。\n\n退出码：0。", rows)
+    check("B3 空行分段 → 不自动合并", b["kind"] not in ("matched",),
+          str(b["kind"]))
     b = backing("登录已完成，exit code 0。支付已完成。", rows)
-    check("B3 登录有证据、支付无证据 → partial，支付不被忽略",
+    check("B4 登录有证据、支付无证据 → partial，支付不被忽略",
           b["kind"] == "partial" and b["units_total"] == 2
           and b["units_matched"] == 1, str(b))
-    b = backing("上传已完成。\n其结果返回 200。", [mk(["HTTP/1.1 200"])])
-    check("B4 回指句带观测 → 合并后可支持",
-          b["kind"] == "matched", str(b["kind"]))
+    b = backing("app.py 已修复，HTTP 200。db.py 已修复，HTTP 200。",
+                [mk(["HTTP/1.1 200"])])
+    check("B5 不同对象共享同一状态码 → 不能据此判归属",
+          b["kind"] != "matched" and b["units_matched"] == 0, str(b))
 
     # ---------------- C. 复现 / 成功分类 ----------------
     print("\n----- C. 复现与成功分类 -----")
     err1 = [mk(["exit code 1"], err=True)]
     b = backing("原故障已复现，exit code 1。", err1)
     check("C1 纯复现有依据 → repro", b["kind"] == "repro", str(b["kind"]))
-    b = backing("原故障已复现，exit code 1。修复已完成，HTTP 200。", err1)
-    check("C2 复现有依据、修复无依据 → partial",
-          b["kind"] == "partial" and b["units_repro"] == 1
-          and b["units_success"] == 0, str(b))
-    both = err1 + [mk(["HTTP/1.1 200"])]
-    b = backing("原故障已复现，exit code 1。修复已完成，HTTP 200。", both)
-    check("C3 两类事项分别有依据 → matched 且类型分开记",
-          b["kind"] == "matched" and b["units_success"] == 1
-          and b["units_repro"] == 1, str(b))
+    b = backing("原故障已复现，exit code 1。它已修复，exit code 0。", err1)
+    check("C2 复现+修复两句、只有失败结果 → 修复不被吞掉",
+          b["kind"] == "partial" and b["units_total"] == 2
+          and b["units_repro"] == 1 and b["units_success"] == 0, str(b))
+    b = backing("原故障已复现，exit code 1。已修复，exit code 0。", err1)
+    check("C3 去掉代词、共享 exit/code → 不合并结论",
+          b["units_total"] == 2 and b["kind"] == "partial", str(b))
+    both = err1 + [mk(["exit code 0"])]
+    b = backing("原故障已复现，exit code 1。它已修复，exit code 0。", both)
+    check("C4 同一对象先复现后修复 → 两种结论分别有依据",
+          b["kind"] == "matched" and b["units_repro"] == 1
+          and b["units_success"] == 1, str(b))
     b = backing("已复现并已修复。", both)
-    check("C4 同句复现+成功无法拆分 → 未确认",
+    check("C5 同句复现+成功无法拆分 → 未确认",
           b["kind"] not in ("matched", "repro"), str(b["kind"]))
     b = backing("原故障已复现，HTTP 500。", [mk(["HTTP/1.1 200"])])
-    check("C5 复现声明找不到对应失败 → 未确认",
+    check("C6 复现声明找不到对应失败 → 未确认",
           b["kind"] == "repro_unconfirmed", str(b["kind"]))
 
     # ---------------- D. 截断优先级 ----------------
@@ -174,7 +183,6 @@ def main():
 
     # ---------------- E. 写入三态 ----------------
     print("\n----- E. 写入三态 -----")
-    # 先有结果，之后才是失败的写请求 —— 该结果必须被标记为「后面可能有写」
     tx = transcript([
         [{"type": "tool_result", "tool_use_id": "r1",
           "content": "exit code 0", "is_error": False}],
@@ -233,8 +241,25 @@ def main():
           not DG._heredoc_doc_ranges(bad3))
     bad4 = "cat | sh <<'EOF'\nrm -rf /\nEOF\n"
     check("F6 cat | sh 不豁免", not DG._heredoc_doc_ranges(bad4))
+    bad5 = "cat > notes.md <<EOF\n$(rm -rf /)\nEOF\n"
+    check("F7 未加引号且含命令替换 → 不豁免",
+          not DG._heredoc_doc_ranges(bad5))
+    bad6 = "cat > notes.md <<'EOF\nrm -rf /\nEOF\n"
+    check("F8 引号未闭合 → 解析失败，不豁免",
+          not DG._heredoc_doc_ranges(bad6))
 
-    # ---------------- G. hook 入口 ----------------
+    # ---------------- H. 汇报测试结果 vs 宣布任务完成 ----------------
+    print("\n----- H. 测试汇报与任务完成 -----")
+    u = EG._claim_units("测试全部通过。")
+    check("H1 只汇报测试结果 → 不作为任务级完成声明",
+          not _has_claim(u), str(u))
+    u = EG._claim_units("任务已完成。")
+    check("H2 任务级完成声明仍被提取", _has_claim(u), str(u))
+    u = EG._claim_units("单元测试 42 项全部通过，功能已修复。")
+    check("H3 同时含任务目标词 → 仍按完成声明处理",
+          _has_claim(u), str(u))
+
+    # ---------------- G. hook 入口与事件 ----------------
     print("\n----- G. hook 入口与事件 -----")
     d = tempfile.mkdtemp(prefix="stab-run-")
     tx_empty = transcript([])
@@ -266,6 +291,8 @@ def main():
                           for e in ev2), "rc=%s ev=%s" % (rc, ev2))
     check("G2b 普通放行不输出 permissionDecision",
           "permissionDecision" not in out, out[:200])
+    check("G2c 普通放行不输出 additionalContext",
+          "additionalContext" not in out, out[:200])
 
     d2b = tempfile.mkdtemp(prefix="stab-run-")
     rc, out, err = run_hook("effect_gate.py", {
@@ -276,7 +303,7 @@ def main():
             "**风险级别**：中\n- 在哪看：x\n- 未验证项：无",
     }, d2b)
     ev2b = [e for e in events(d2b) if e.get("session") == "g2b"]
-    check("G2c 证据块 + 真实结果匹配 → verified_by_observed_results",
+    check("G2d 证据块 + 真实结果匹配 → verified_by_observed_results",
           rc == 0 and any(e.get("rule_id") == "verified_by_observed_results"
                           for e in ev2b), "rc=%s ev=%s" % (rc, ev2b))
 
@@ -294,25 +321,59 @@ def main():
     check("G3c 重试轮次不追加模型上下文",
           "additionalContext" not in out, out[:200])
 
+    # 部分有依据 → allow_unconfirmed + additionalContext
     d4 = tempfile.mkdtemp(prefix="stab-run-")
-    rc, out, err = run_hook("destructive_gate.py", {
-        "session_id": "g4", "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_input": {"command": "cat <<'EOF' | sh\nrm -rf /\nEOF\n"},
+    rc, out, err = run_hook("effect_gate.py", {
+        "session_id": "g4", "hook_event_name": "Stop",
+        "stop_hook_active": False, "transcript_path": tx_ok,
+        "last_assistant_message":
+            "上传已完成，exit code 0。支付已完成。\n\n**证据**：L2 动态\n"
+            "**风险级别**：中\n- 在哪看：x\n- 未验证项：无",
     }, d4)
-    check("G4 管道执行式 heredoc 被拦", rc == 2, "rc=%s" % rc)
-    check("G4b 阻断 JSON 含 permissionDecision=deny",
-          '"permissionDecision": "deny"' in out, out[:200])
+    ev4 = [e for e in events(d4) if e.get("session") == "g4"]
+    check("G4 部分有依据 → allow_unconfirmed",
+          rc == 0 and any(e.get("decision") == "allow_unconfirmed" for e in ev4),
+          "rc=%s ev=%s" % (rc, ev4))
+    check("G4b 未确认路径输出 additionalContext",
+          "additionalContext" in out, out[:300])
+    _hso = (json.loads(out or "{}").get("hookSpecificOutput") or {}) \
+        if out.strip().startswith("{") else {}
+    check("G4c additionalContext 带正确的 hookEventName",
+          _hso.get("hookEventName") == "Stop", out[:200])
 
     d5 = tempfile.mkdtemp(prefix="stab-run-")
     rc, out, err = run_hook("destructive_gate.py", {
         "session_id": "g5", "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
+        "tool_input": {"command": "cat <<'EOF' | sh\nrm -rf /\nEOF\n"},
+    }, d5)
+    check("G5 管道执行式 heredoc 被拦", rc == 2, "rc=%s" % rc)
+    check("G5b 阻断 JSON 含 permissionDecision=deny",
+          '"permissionDecision": "deny"' in out, out[:200])
+
+    d6 = tempfile.mkdtemp(prefix="stab-run-")
+    rc, out, err = run_hook("destructive_gate.py", {
+        "session_id": "g6", "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
         "tool_input": {"command":
                        "cat > notes.md <<'EOF'\n"
                        "这里提到 rm -rf / 但只是文案\nEOF\n"},
-    }, d5)
-    check("G5 纯文档 heredoc 放行", rc == 0, "rc=%s" % rc)
+    }, d6)
+    check("G6 纯文档 heredoc 放行", rc == 0, "rc=%s" % rc)
+
+    d7 = tempfile.mkdtemp(prefix="stab-run-")
+    rc, out, err = run_hook("effect_gate.py", {
+        "session_id": "g7", "hook_event_name": "Stop",
+        "stop_hook_active": False, "transcript_path": tx_ok,
+        "last_assistant_message": "测试全部通过。",
+    }, d7)
+    _ev7 = events(d7)
+    check("G7 只汇报测试结果 → 不阻断、不要求证据",
+          rc == 0 and not any(e.get("decision") in ("stop_feedback", "deny")
+                              for e in _ev7), "rc=%s ev=%s" % (rc, _ev7))
+    check("G7b 记录 allow_report_only（可统计）",
+          any(e.get("rule_id") == "report_only_no_task_claim"
+              for e in _ev7), str(_ev7))
 
     # ---------------- 汇总 ----------------
     npass = sum(1 for _, ok, _ in _results if ok)

@@ -272,12 +272,12 @@ python tools/preflight_release.py
 <details>
 <summary>维护者：测试套件与计数</summary>
 
-当前二十一套测试中，20 套功能测试合计 **556 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
+当前二十一套测试中，20 套功能测试合计 **569 项**，文档一致性检查自身 **20 项**另计。数字用于维护检查覆盖，不代表产品可靠性百分比。
 
 | 测试 | 用例数 |
 |---|---:|
 | `tests/four_gate_selftest.py` | 58 |
-| `tests/g3_g5_stabilization_test.py` | 38 |
+| `tests/g3_g5_stabilization_test.py` | 51 |
 | `tests/cmd_chain_test.py` | 21 |
 | `tests/adversarial_test.py` | 25 |
 | `tests/budget_safety_test.py` | 44 |
