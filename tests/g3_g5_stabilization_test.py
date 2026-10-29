@@ -258,6 +258,15 @@ def main():
     u = EG._claim_units("单元测试 42 项全部通过，功能已修复。")
     check("H3 同时含任务目标词 → 仍按完成声明处理",
           _has_claim(u), str(u))
+    u = EG._claim_units("测试全部通过，上传已完成。")
+    check("H4 同句前半只汇报测试 → 后半「上传已完成」仍被提取",
+          _has_claim(u) and "已完成" in (u[0]["claims"] if u else []), str(u))
+    check("H5 中文「退出码：0」可作为行内证据",
+          bool(EG.INLINE_EVIDENCE_RX.search("退出码：0")),
+          "INLINE 未命中")
+    check("H6 中文「返回码 0」可作为行内证据",
+          bool(EG.INLINE_EVIDENCE_RX.search("返回码 0")),
+          "INLINE 未命中")
 
     # ---------------- G. hook 入口与事件 ----------------
     print("\n----- G. hook 入口与事件 -----")

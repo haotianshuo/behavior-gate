@@ -192,12 +192,12 @@ python tools/preflight_release.py
 不要同时启动多个全量预检，以免资源竞争干扰耗时敏感测试。源码与包内回归通过，不等于所有真实宿主和业务场景都通过。
 
 <details>
-<summary>完整测试清单：21 套测试，功能回归 569 项，文档检查另计</summary>
+<summary>完整测试清单：21 套测试，功能回归 572 项，文档检查另计</summary>
 
 | 脚本 | 用例 |
 | --- | ---: |
 | `tests/four_gate_selftest.py` | 58 |
-| `tests/g3_g5_stabilization_test.py` | 51 |
+| `tests/g3_g5_stabilization_test.py` | 54 |
 | `tests/cmd_chain_test.py` | 21 |
 | `tests/adversarial_test.py` | 25 |
 | `tests/budget_safety_test.py` | 44 |

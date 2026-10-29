@@ -515,6 +515,10 @@ INLINE_EVIDENCE_RX = re.compile(
     r"|(都是|均为|全是|全为|都为)\s*[1-5]\d\d"
     r"|\b[1-5]\d\d\s*(OK|Created|No Content|Not Found)"
     r"|\b(exit|rc)\s*(code)?\s*[:=]?\s*0\b"
+    # ⚠️ 稳定化微修：与 result_scan 的 _OBS_EXIT_RX 对齐，补中文写法。
+    #    修前只认 exit/rc，导致「退出码：0」在正文里不算行内证据 ——
+    #    同一条规则写在两处、词表不一致，是项目反复出现的老毛病。
+    r"|(?:退出码|返回码)\s*[:：=是为]?\s*0(?![0-9])"
     r"|listening\s+on\s+\S+)", re.I)
 
 # 3.5.19 修补：「预期失败」类声明。
@@ -615,11 +619,19 @@ _TASK_GOAL_RX = re.compile(r"(任务|功能|问题|修复|需求|目标|上线|�
 
 
 def _is_report_only(sent, m):
-    """这个完成词是否只修饰「测试/检查」而不是任务目标。"""
+    """这个完成词是否只修饰「测试/检查」而不是任务目标。
+
+    ⚠️ 稳定化微修：窗口必须限制在【当前子句】。修前用固定 10 字窗口，
+       会跨过逗号把前一分句的「测试」算进后一分句 ——
+       「测试全部通过，上传已完成」整句被降级成汇报，后半句直接不检查。
+    """
     if _TASK_GOAL_RX.search(sent):
         return False
-    before = sent[max(0, m.start() - 10):m.start()]
-    after = sent[m.end():m.end() + 6]
+    bounds = _clause_bounds(sent)
+    seg_start = _clause_start(bounds, m.start())
+    _next = next((b for b in bounds if b > m.end()), len(sent))
+    before = sent[max(seg_start, m.start() - 10):m.start()]
+    after = sent[m.end():_next]
     return bool(_REPORT_SUBJECT_RX.search(before + after))
 
 
