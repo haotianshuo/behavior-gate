@@ -116,7 +116,9 @@ def _write_targets(name, tool_input):
 # 刻意只认这三类可机器比对的观测；其余文本一律不猜。
 _OBS_HTTP_RX = re.compile(r"\b([1-5]\d\d)\b")
 _OBS_EXIT_RX = re.compile(
-    r"(?:\bexit\s*(?:code|status)?|退出码|返回码)\s*"
+    # ⚠️ 稳定化微修：补 \brc\b —— 行内证据 INLINE_EVIDENCE_RX 一直认 rc，
+    #    这里不认，导致「已修复，rc=0」永远对不上证据（同一规则两处不一致）。
+    r"(?:\bexit\s*(?:code|status)?|\brc\b|退出码|返回码)\s*"
     r"[:：=是为]?\s*(\d+)\b", re.I)
 _OBS_LISTEN_RX = re.compile(r"listening on\s+(\S+)", re.I)
 

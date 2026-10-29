@@ -609,7 +609,10 @@ _OBJ_STOPWORDS = frozenset({
 
 # 证据标签：常见的「结论 + 检查结果」格式。同段时作为归属线索。
 _EVIDENCE_LABEL_RX = re.compile(
-    r"^\s*(结果|输出|返回|退出码|返回码|状态码|响应|端口|日志|证据|实测)\s*[:：]?")
+    r"^\s*(结果|输出|返回|退出码|返回码|状态码|响应|端口|日志|证据|实测"
+    # ⚠️ 稳定化微修：补英文标签，与 _OBS_EXIT_RX / _SIGNAL_RX 的英文形态对齐。
+    #    修前只认中文，`exit code：0` 换行书写时不会合并到上一事项。
+    r"|exit\s*code|status|output|result)\s*[:：]?", re.I)
 
 # 汇报测试结果 vs 宣布任务完成。
 # 「测试全部通过」是在汇报检查结果，不该被当成任务级完成宣言；
@@ -621,17 +624,26 @@ _TASK_GOAL_RX = re.compile(r"(任务|功能|问题|修复|需求|目标|上线|�
 def _is_report_only(sent, m):
     """这个完成词是否只修饰「测试/检查」而不是任务目标。
 
-    ⚠️ 稳定化微修：窗口必须限制在【当前子句】。修前用固定 10 字窗口，
-       会跨过逗号把前一分句的「测试」算进后一分句 ——
-       「测试全部通过，上传已完成」整句被降级成汇报，后半句直接不检查。
+    ⚠️ 稳定化微修（第三轮）：两条边界都要同时守住 ——
+      · 窗口限制在【当前子句】，修前固定 10 字窗口会跨逗号把前一分句的
+        「测试」算进后一分句（「测试全部通过，上传已完成」→ 后半句不检查）；
+      · 右侧仍保留【6 字上限】，修前扩到子句末尾，会因远处出现「测试」
+        （「上传已完成并将进入下一轮测试」）把完成声明误降级成汇报。
+      · 「测试：全部通过」这类冒号引出的结果，主体在冒号前 ——
+        完成词前紧邻冒号时，窗口再往前扩一个子句。
     """
     if _TASK_GOAL_RX.search(sent):
         return False
     bounds = _clause_bounds(sent)
     seg_start = _clause_start(bounds, m.start())
+    _pre = sent[:m.start()].rstrip()
+    if _pre.endswith(("：", ":")):
+        _colon = max(_pre.rfind("："), _pre.rfind(":"))
+        if _colon >= 0:
+            seg_start = _clause_start(bounds, _colon)
     _next = next((b for b in bounds if b > m.end()), len(sent))
     before = sent[max(seg_start, m.start() - 10):m.start()]
-    after = sent[m.end():_next]
+    after = sent[m.end():min(m.end() + 6, _next)]
     return bool(_REPORT_SUBJECT_RX.search(before + after))
 
 

@@ -267,6 +267,17 @@ def main():
     check("H6 中文「返回码 0」可作为行内证据",
           bool(EG.INLINE_EVIDENCE_RX.search("返回码 0")),
           "INLINE 未命中")
+    u = EG._claim_units("测试：全部通过。")
+    check("H7 冒号引出的测试结果仍算汇报，不误拦",
+          not _has_claim(u), str(u))
+    u = EG._claim_units("上传已完成并将进入下一轮测试。")
+    check("H8 句末提到「测试」不掩盖前面的完成声明",
+          _has_claim(u) and "已完成" in (u[0]["claims"] if u else []), str(u))
+    check("H9 「rc=0」与 exit code 0 同口径",
+          "exit:0" in RS.obs_tokens("rc=0"), str(RS.obs_tokens("rc=0")))
+    check("H10 英文证据标签可触发同段合并",
+          bool(EG._EVIDENCE_LABEL_RX.match("exit code：0")),
+          "LABEL 未命中")
 
     # ---------------- G. hook 入口与事件 ----------------
     print("\n----- G. hook 入口与事件 -----")
@@ -383,6 +394,34 @@ def main():
     check("G7b 记录 allow_report_only（可统计）",
           any(e.get("rule_id") == "report_only_no_task_claim"
               for e in _ev7), str(_ev7))
+
+    d8 = tempfile.mkdtemp(prefix="stab-run-")
+    rc, out, err = run_hook("effect_gate.py", {
+        "session_id": "g8", "hook_event_name": "Stop",
+        "stop_hook_active": False, "transcript_path": tx_ok,
+        "last_assistant_message": "测试：全部通过。",
+    }, d8)
+    check("G8 冒号式测试汇报不误拦", rc == 0, "rc=%s" % rc)
+
+    d9 = tempfile.mkdtemp(prefix="stab-run-")
+    rc, out, err = run_hook("effect_gate.py", {
+        "session_id": "g9", "hook_event_name": "Stop",
+        "stop_hook_active": False, "transcript_path": tx_empty,
+        "last_assistant_message": "上传已完成并将进入下一轮测试。",
+    }, d9)
+    check("G9 句末提到测试不掩盖完成声明（应仍检查）", rc == 2,
+          "rc=%s" % rc)
+
+    d10 = tempfile.mkdtemp(prefix="stab-run-")
+    rc, out, err = run_hook("effect_gate.py", {
+        "session_id": "g10", "hook_event_name": "Stop",
+        "stop_hook_active": False, "transcript_path": tx_ok,
+        "last_assistant_message": "上传已完成，rc=0。",
+    }, d10)
+    ev10 = [e for e in events(d10) if e.get("session") == "g10"]
+    check("G10 「rc=0」可作为证据对照",
+          rc == 0 and any(e.get("rule_id") == "inline_evidence_corroborated"
+                          for e in ev10), "rc=%s ev=%s" % (rc, ev10))
 
     # ---------------- 汇总 ----------------
     npass = sum(1 for _, ok, _ in _results if ok)
